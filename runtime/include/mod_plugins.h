@@ -230,6 +230,15 @@ int psx_mod_set_native_vblank_rate(uint32_t frames_per_second);
 int psx_mod_set_cpu_overclock(uint32_t percent);
 
 /*
+ * Smooth the SPU CD audio input (XA / CD-DA): after the input FIFO runs dry,
+ * resume only once `prebuffer_ms` of audio is queued, and fade a dry FIFO out
+ * instead of stepping to zero. Removes the click at the start of each new
+ * stream that real-hardware-accurate emulators reproduce. 0 restores stock
+ * behaviour; values above 250 ms are rejected.
+ */
+int psx_mod_set_cd_audio_smoothing(uint32_t prebuffer_ms);
+
+/*
  * Enable presentation-only frame interpolation while leaving guest VBlank,
  * game logic, timers, and audio at their stock cadence. The OpenGL presenter
  * temporally blends completed guest frames at the requested output rate on its

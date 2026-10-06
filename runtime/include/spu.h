@@ -135,6 +135,14 @@ int spu_dma_ready(void);
 void spu_cd_audio_push(const int16_t* stereo, int frames);
 void spu_cd_audio_reset(void);
 
+/* CD audio smoothing (enhancement tier, opt-in; 0 = stock behaviour).
+ * After the CD input FIFO runs dry -- every new XA/CDDA stream starts that
+ * way -- playback resumes only once `prebuffer_frames` are queued, so sector
+ * delivery jitter cannot starve the stream right after it starts; a dry FIFO
+ * then fades the last sample out instead of stepping to zero. Both remove the
+ * click heard once per new stream (also on DuckStation). */
+void spu_set_cd_audio_prebuffer(uint32_t prebuffer_frames);
+
 /* Get pointer to SPU RAM for direct access (512KB) */
 const uint8_t* spu_get_ram(void);
 

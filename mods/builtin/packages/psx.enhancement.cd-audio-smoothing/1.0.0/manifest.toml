@@ -1,0 +1,36 @@
+format_version = 5
+id = "psx.enhancement.cd-audio-smoothing"
+version = "1.0.0"
+name = "CD Audio Smoothing"
+author = "psxrecomp"
+description = "Removes the click at the start of each new CD audio stream (FMV soundtrack, XA speech, CD music). Each stream starts with an empty CD input buffer, so one late sector briefly starves it; real hardware and accurate emulators click there too."
+resolver = "declarative"
+save_compatibility = "shared"
+
+# CD audio buffering is a property of the emulated hardware, not of any
+# particular disc, so this ships with the framework and applies to every game.
+[[target]]
+game_id = "*"
+
+[[feature]]
+id = "cd-audio-smoothing"
+name = "CD Audio Smoothing"
+description = "Disabled by default. Waits until a little CD audio is queued before a new stream plays, and fades out instead of cutting to silence if the buffer still runs dry. Delays the start of each stream by about the prebuffer time. Not hardware-faithful: games that read the SPU capture buffers see the CD audio slightly later."
+group = "Audio"
+default_enabled = false
+
+[[option]]
+feature = "cd-audio-smoothing"
+id = "prebuffer_ms"
+label = "Prebuffer (ms)"
+description = "CD audio queued before a new stream starts. 80 covers one late XA sector; 0 keeps stock timing and only fades a dry buffer."
+group = "Audio"
+type = "integer"
+min = 0
+max = 250
+step = 10
+default = 80
+
+[[plugin]]
+feature = "cd-audio-smoothing"
+id = "psx.cd-audio-smoothing"

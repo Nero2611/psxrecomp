@@ -1451,6 +1451,20 @@ extern "C" int psx_mod_set_cpu_overclock(uint32_t percent) {
     return 1;
 }
 
+extern "C" int psx_mod_set_cd_audio_smoothing(uint32_t prebuffer_ms) {
+    if (prebuffer_ms > 250) {
+        std::fprintf(stdout,
+            "psxrecomp: mod rejected invalid CD audio prebuffer %u ms\n",
+            (unsigned)prebuffer_ms);
+        return 0;
+    }
+    spu_set_cd_audio_prebuffer(prebuffer_ms * 44100u / 1000u);
+    std::fprintf(stdout,
+        "psxrecomp: mod selected CD audio smoothing (%u ms prebuffer, "
+        "fade on dry FIFO)\n", (unsigned)prebuffer_ms);
+    return 1;
+}
+
 extern "C" int psx_mod_set_frame_interpolation(
     uint32_t frames_per_second) {
     if (frames_per_second != 0 &&

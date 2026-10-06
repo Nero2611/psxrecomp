@@ -126,6 +126,10 @@ static uint32_t cd_frame_count;
 static uint64_t cd_push_frames;
 static uint64_t cd_overflow_frames;
 static uint64_t cd_underflow_frames;
+/* CD audio smoothing (see spu_set_cd_audio_prebuffer); 0 = stock. */
+static uint32_t cd_prebuffer_frames;
+static int      cd_priming = 1;
+static int32_t  cd_tail_l, cd_tail_r;
 
 /* ADSR phases — match Beetle's order so cross-process diffs read straight. */
 #define ADSR_ATTACK   0
@@ -416,6 +420,15 @@ void spu_cd_audio_reset(void) {
     cd_push_frames = 0;
     cd_overflow_frames = 0;
     cd_underflow_frames = 0;
+    cd_priming = 1;
+    cd_tail_l = cd_tail_r = 0;
+}
+
+void spu_set_cd_audio_prebuffer(uint32_t prebuffer_frames) {
+    if (prebuffer_frames > SPU_CD_RING_FRAMES / 2u)
+        prebuffer_frames = SPU_CD_RING_FRAMES / 2u;
+    cd_prebuffer_frames = prebuffer_frames;
+    cd_priming = 1;
 }
 
 void spu_cd_audio_push(const int16_t* stereo, int frames) {
@@ -453,10 +466,27 @@ void spu_cd_audio_push(const int16_t* stereo, int frames) {
                       cd_frame_count);
 }
 
+/* Returns 0 when no queued frame was consumed. With smoothing enabled the
+ * outputs then carry the decaying tail of the last frame instead of zero. */
 static int cd_audio_pop(int16_t* left, int16_t* right) {
-    if (cd_frame_count == 0) return 0;
+    if (cd_prebuffer_frames) {
+        if (cd_frame_count == 0)
+            cd_priming = 1;
+        if (cd_priming && cd_frame_count < cd_prebuffer_frames) {
+            cd_tail_l -= cd_tail_l / 16;   /* ~1 ms to near silence */
+            cd_tail_r -= cd_tail_r / 16;
+            *left = (int16_t)cd_tail_l;
+            *right = (int16_t)cd_tail_r;
+            return 0;
+        }
+        cd_priming = 0;
+    } else if (cd_frame_count == 0) {
+        return 0;
+    }
     *left = cd_ring[cd_read_pos * 2u + 0u];
     *right = cd_ring[cd_read_pos * 2u + 1u];
+    cd_tail_l = *left;
+    cd_tail_r = *right;
     cd_read_pos = (cd_read_pos + 1u) % SPU_CD_RING_FRAMES;
     cd_frame_count--;
     return 1;
