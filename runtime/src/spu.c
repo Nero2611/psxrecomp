@@ -127,8 +127,11 @@ static uint64_t cd_push_frames;
 static uint64_t cd_overflow_frames;
 static uint64_t cd_underflow_frames;
 /* CD audio smoothing (see spu_set_cd_audio_prebuffer); 0 = stock. */
+#define CD_FADE_IN_FRAMES 88u   /* 2 ms */
 static uint32_t cd_prebuffer_frames;
 static int      cd_priming = 1;
+static uint32_t cd_prime_wait;     /* output frames waited since data arrived */
+static uint32_t cd_fade_in_left;
 static int32_t  cd_tail_l, cd_tail_r;
 
 /* ADSR phases — match Beetle's order so cross-process diffs read straight. */
@@ -421,6 +424,8 @@ void spu_cd_audio_reset(void) {
     cd_overflow_frames = 0;
     cd_underflow_frames = 0;
     cd_priming = 1;
+    cd_prime_wait = 0;
+    cd_fade_in_left = 0;
     cd_tail_l = cd_tail_r = 0;
 }
 
@@ -429,6 +434,7 @@ void spu_set_cd_audio_prebuffer(uint32_t prebuffer_frames) {
         prebuffer_frames = SPU_CD_RING_FRAMES / 2u;
     cd_prebuffer_frames = prebuffer_frames;
     cd_priming = 1;
+    cd_prime_wait = 0;
 }
 
 void spu_cd_audio_push(const int16_t* stereo, int frames) {
@@ -467,26 +473,47 @@ void spu_cd_audio_push(const int16_t* stereo, int frames) {
 }
 
 /* Returns 0 when no queued frame was consumed. With smoothing enabled the
- * outputs then carry the decaying tail of the last frame instead of zero. */
+ * outputs then carry the decaying tail of the last frame instead of zero.
+ *
+ * Smoothing holds playback back for a fixed time after data reappears rather
+ * than until a fill level is reached: XA delivers whole sectors (53 ms of
+ * 37.8 kHz stereo, 213 ms of 18.9 kHz mono), so a single push already passes
+ * any small fill threshold and leaves no margin for the next one. A fixed
+ * delay keeps the FIFO ahead of playback by that much regardless of sector
+ * size; resuming then fades in from the decayed tail instead of stepping. */
 static int cd_audio_pop(int16_t* left, int16_t* right) {
     if (cd_prebuffer_frames) {
-        if (cd_frame_count == 0)
+        if (cd_frame_count == 0) {
             cd_priming = 1;
-        if (cd_priming && cd_frame_count < cd_prebuffer_frames) {
-            cd_tail_l -= cd_tail_l / 16;   /* ~1 ms to near silence */
-            cd_tail_r -= cd_tail_r / 16;
-            *left = (int16_t)cd_tail_l;
-            *right = (int16_t)cd_tail_r;
-            return 0;
+            cd_prime_wait = 0;
         }
-        cd_priming = 0;
+        if (cd_priming) {
+            if (cd_frame_count == 0 || ++cd_prime_wait < cd_prebuffer_frames) {
+                cd_tail_l -= cd_tail_l / 16;   /* ~1 ms to near silence */
+                cd_tail_r -= cd_tail_r / 16;
+                *left = (int16_t)cd_tail_l;
+                *right = (int16_t)cd_tail_r;
+                return 0;
+            }
+            cd_priming = 0;
+            cd_fade_in_left = CD_FADE_IN_FRAMES;
+        }
     } else if (cd_frame_count == 0) {
         return 0;
     }
-    *left = cd_ring[cd_read_pos * 2u + 0u];
-    *right = cd_ring[cd_read_pos * 2u + 1u];
-    cd_tail_l = *left;
-    cd_tail_r = *right;
+    int32_t l = cd_ring[cd_read_pos * 2u + 0u];
+    int32_t r = cd_ring[cd_read_pos * 2u + 1u];
+    if (cd_fade_in_left) {
+        int32_t k = (int32_t)cd_fade_in_left;
+        int32_t n = (int32_t)CD_FADE_IN_FRAMES;
+        l = (l * (n - k) + cd_tail_l * k) / n;
+        r = (r * (n - k) + cd_tail_r * k) / n;
+        cd_fade_in_left--;
+    }
+    *left = (int16_t)l;
+    *right = (int16_t)r;
+    cd_tail_l = l;
+    cd_tail_r = r;
     cd_read_pos = (cd_read_pos + 1u) % SPU_CD_RING_FRAMES;
     cd_frame_count--;
     return 1;

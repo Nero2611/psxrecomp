@@ -15,7 +15,7 @@ game_id = "*"
 [[feature]]
 id = "cd-audio-smoothing"
 name = "CD Audio Smoothing"
-description = "Disabled by default. Waits until a little CD audio is queued before a new stream plays, and fades out instead of cutting to silence if the buffer still runs dry. Delays the start of each stream by about the prebuffer time. Not hardware-faithful: games that read the SPU capture buffers see the CD audio slightly later."
+description = "Disabled by default. Holds CD audio back for a fixed time after it starts arriving, so the buffer stays ahead of playback even when whole XA sectors arrive late; if it still runs dry, the sound fades out and fades back in instead of cutting. Delays each stream by about the prebuffer time. Not hardware-faithful: games that read the SPU capture buffers see the CD audio slightly later."
 group = "Audio"
 default_enabled = false
 
@@ -23,13 +23,13 @@ default_enabled = false
 feature = "cd-audio-smoothing"
 id = "prebuffer_ms"
 label = "Prebuffer (ms)"
-description = "CD audio queued before a new stream starts. 80 covers one late XA sector; 0 keeps stock timing and only fades a dry buffer."
+description = "How long CD audio is held back after it starts arriving. 100 absorbs late XA sectors in speech-heavy scenes; 0 keeps stock timing and only fades a dry buffer in and out."
 group = "Audio"
 type = "integer"
 min = 0
 max = 250
 step = 10
-default = 80
+default = 100
 
 [[plugin]]
 feature = "cd-audio-smoothing"

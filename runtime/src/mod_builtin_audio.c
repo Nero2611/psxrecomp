@@ -15,7 +15,7 @@
 
 static void builtin_cd_audio_smoothing_activate(void) {
     char text[16] = "";
-    long ms = 80;
+    long ms = 100;
     if (psx_mod_option_value(PKG_CD_SMOOTH, "cd-audio-smoothing", "prebuffer_ms",
                              text, sizeof text) && text[0]) {
         char* end = NULL;
