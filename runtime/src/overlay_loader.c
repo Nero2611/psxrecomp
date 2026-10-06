@@ -1273,6 +1273,13 @@ typedef struct {
     int resident;
     int capacity_suppressed;
     char path[768];
+    uint32_t path_hash;   /* cache_path_hash(path): cheap reject before compare */
+    /* Parsed .ranges manifest, kept across rescans. Cache artifact names are
+     * immutable, so a manifest that parsed once never changes; re-reading
+     * thousands of them on every post-compile rescan stalled the emulation
+     * thread for ~0.4 s. Failed parses are not cached and retry next time. */
+    ManFn *man_cache;
+    int    man_cache_n;
 } CacheEntry;
 static CacheEntry s_cache_idx[CACHE_IDX_CAP];
 static int        s_cache_idx_count = 0;
@@ -1376,6 +1383,23 @@ static int cache_path_equal(const char *a, const char *b) {
         b++;
     }
     return *a == '\0' && *b == '\0';
+}
+
+/* FNV-1a over the same normalization cache_path_char_equal applies, so equal
+ * paths hash equal. Rescans test every directory entry against the whole
+ * index; comparing hashes first keeps that linear walk from costing millions
+ * of 768-byte string compares on the emulation thread once the cache holds
+ * thousands of DLLs. */
+static uint32_t cache_path_hash(const char *p) {
+    uint32_t h = 2166136261u;
+    for (; p && *p; p++) {
+        unsigned char c = (unsigned char)*p;
+#ifdef _WIN32
+        c = (c == '\\') ? (unsigned char)'/' : (unsigned char)tolower(c);
+#endif
+        h = (h ^ c) * 16777619u;
+    }
+    return h;
 }
 
 static int cache_path_has_root(const char *path, const char *root) {
@@ -1628,9 +1652,14 @@ static void rebuild_lazy_manifest_index(void) {
             continue;
         snprintf(path + n - OVERLAY_SHARED_EXT_LEN,
                  sizeof(path) - (n - OVERLAY_SHARED_EXT_LEN), ".ranges");
-        int man_n = 0;
-        ManFn *man = parse_manifest(path, &man_n, NULL, NULL, NULL);
-        if (!man) continue;
+        int man_n = s_cache_idx[ci].man_cache_n;
+        ManFn *man = s_cache_idx[ci].man_cache;
+        if (!man) {
+            man = parse_manifest(path, &man_n, NULL, NULL, NULL);
+            if (!man) continue;
+            s_cache_idx[ci].man_cache = man;
+            s_cache_idx[ci].man_cache_n = man_n;
+        }
         s_cache_idx[ci].manifest_ok = 1;
         s_cache_idx[ci].func_count = man_n;
         for (int mi = 0; mi < man_n; mi++) {
@@ -1690,15 +1719,16 @@ static void rebuild_lazy_manifest_index(void) {
             }
             if (s_lazy_man_overflow) break;
         }
-        free(man);
         if (s_lazy_man_overflow) break;
     }
     for (int i = 0; i < s_cand_n; i++) exact_entry_set(s_cand[i].addr);
 }
 
 static int cache_idx_has_path(const char *path) {
+    const uint32_t h = cache_path_hash(path);
     for (int i = 0; i < s_cache_idx_count; i++)
-        if (cache_path_equal(s_cache_idx[i].path, path)) return 1;
+        if (s_cache_idx[i].path_hash == h &&
+            cache_path_equal(s_cache_idx[i].path, path)) return 1;
     return 0;
 }
 
@@ -1739,10 +1769,47 @@ static int cache_path_is_bios_resident(const char *dll_path) {
     return strstr(buf, BIOS_RESIDENT_MARKER_SCHEMA) != NULL;
 }
 
-static void refresh_bios_resident_flags(void) {
+#ifdef _WIN32
+/* Re-check only the index entries whose sidecar exists. One directory walk
+ * for *.resident replaces a failed fopen per indexed DLL, which cost tens of
+ * milliseconds on the emulation thread per rescan with thousands of DLLs. */
+static void mark_bios_resident_in_dir(const char *dir) {
+    char pattern[900];
+    snprintf(pattern, sizeof pattern, "%s/*.resident", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    const size_t ext = strlen(".resident");
+    do {
+        char dll[900];
+        snprintf(dll, sizeof dll, "%s/%s", dir, fd.cFileName);
+        size_t n = strlen(dll);
+        if (n <= ext) continue;
+        snprintf(dll + n - ext, sizeof dll - (n - ext), "%s", OVERLAY_SHARED_EXT);
+        const uint32_t hash = cache_path_hash(dll);
+        for (int i = 0; i < s_cache_idx_count; i++)
+            if (s_cache_idx[i].path_hash == hash &&
+                cache_path_equal(s_cache_idx[i].path, dll))
+                s_cache_idx[i].resident =
+                    cache_path_is_bios_resident(s_cache_idx[i].path);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+#endif
+
+static void refresh_bios_resident_flags(const char *gcc_dir,
+                                        const char *tcc_dir) {
+#ifdef _WIN32
+    for (int i = 0; i < s_cache_idx_count; i++) s_cache_idx[i].resident = 0;
+    mark_bios_resident_in_dir(gcc_dir);
+    mark_bios_resident_in_dir(tcc_dir);
+#else
+    (void)gcc_dir;
+    (void)tcc_dir;
     for (int i = 0; i < s_cache_idx_count; i++)
         s_cache_idx[i].resident =
             cache_path_is_bios_resident(s_cache_idx[i].path);
+#endif
 }
 
 /* Canonical cache arch-abi tag (caches are namespaced per backend AND per
@@ -1797,6 +1864,9 @@ static int add_posix_cache_file(const PsxOverlayCacheFile *file, void *opaque) {
     e->resident = cache_path_is_bios_resident(file->path);
     e->capacity_suppressed = 0;
     snprintf(e->path, sizeof(e->path), "%s", file->path);
+    e->path_hash = cache_path_hash(e->path);
+    e->man_cache = NULL;
+    e->man_cache_n = 0;
     return 0;
 }
 #endif
@@ -1840,6 +1910,9 @@ static void scan_one_cache_dir(const char *dir, int tier) {
         e->load_failed = 0;
         e->capacity_suppressed = 0;
         snprintf(e->path, sizeof(e->path), "%s", full);
+        e->path_hash = cache_path_hash(e->path);
+        e->man_cache = NULL;
+        e->man_cache_n = 0;
         e->resident = cache_path_is_bios_resident(full);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
@@ -1913,6 +1986,7 @@ static void warn_on_cgtag_mismatch(const char *tier) {
 static void cache_idx_remove_path(const char *path) {
     for (int i = 0; i < s_cache_idx_count; i++) {
         if (cache_path_equal(s_cache_idx[i].path, path)) {
+            free(s_cache_idx[i].man_cache);
             s_cache_idx[i] = s_cache_idx[--s_cache_idx_count];
             return;
         }
@@ -2006,6 +2080,7 @@ static void abi_preflight_sweep(const char *dir) {
             purged++;
             for (int i = 0; i < s_cache_idx_count; i++) {
                 if (cache_path_equal(s_cache_idx[i].path, full)) {
+                    free(s_cache_idx[i].man_cache);
                     s_cache_idx[i] = s_cache_idx[--s_cache_idx_count];
                     break;
                 }
@@ -2042,7 +2117,7 @@ static void abi_preflight_sweep(const char *dir) {
 }
 
 static void scan_cache_dir(void) {
-    char dir[768];
+    char dir[768], gcc_dir[768];
     /* Index both tiers and every immutable artifact. Runtime selection prefers
      * usable GCC over TCC; an invalid GCC artifact cannot suppress a valid TCC
      * fallback merely because its filename was enumerated first. */
@@ -2052,6 +2127,7 @@ static void scan_cache_dir(void) {
              (unsigned)PSX_OVERLAY_FLAVOR);
     scan_one_cache_dir(dir, CACHE_TIER_GCC);
     abi_preflight_sweep(dir);
+    snprintf(gcc_dir, sizeof(gcc_dir), "%s", dir);
     snprintf(dir, sizeof(dir), "%s/%s/tcc/%s/cg%d_%08x_gc%08x_f%u",
              s_cache_dir, s_game_id, PSX_OVERLAY_ARCH_ABI, PSX_OVERLAY_CODEGEN_VER,
              (unsigned)PSX_OVERLAY_CODEGEN_HASH, (unsigned)s_config_hash,
@@ -2059,7 +2135,7 @@ static void scan_cache_dir(void) {
     scan_one_cache_dir(dir, CACHE_TIER_TCC);
     abi_preflight_sweep(dir);
 
-    refresh_bios_resident_flags();
+    refresh_bios_resident_flags(gcc_dir, dir);
     rebuild_lazy_manifest_index();
 
     /* Never-again guard: if we loaded NOTHING but wrong-hash shards exist, shout. */
