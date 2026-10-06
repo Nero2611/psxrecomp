@@ -66,6 +66,32 @@ extern int g_psx_cyc_bb_defer;
  * via psx_cyc_local_publish / psx_cyc_batch_flush before IRQ/MMIO barriers. */
 extern uint32_t *g_psx_cyc_local_acc;
 
+/* CPU overclock (enhancement tier, opt-in; DuckStation's "CPU overclock").
+ * CPU-side charges -- instruction base cost, memory waits, I-cache refills --
+ * reach the shared device timeline multiplied by g_psx_cpu_oc_q16 / 65536, so
+ * the CPU retires more instructions per guest frame while GPU, CD-ROM, SPU,
+ * timers and VBlank keep their stock cadence. 0 = off (stock timing, and the
+ * hot path below is unchanged). g_psx_cpu_oc_frac carries the sub-cycle
+ * remainder so no CPU work is lost to rounding. Set via
+ * psx_mod_set_cpu_overclock() (mod_plugins.h). */
+extern uint32_t g_psx_cpu_oc_q16;
+extern uint32_t g_psx_cpu_oc_frac;
+
+static inline uint32_t psx_cpu_oc_scale(uint64_t cpu_cycles) {
+    uint64_t v = cpu_cycles * (uint64_t)g_psx_cpu_oc_q16 + g_psx_cpu_oc_frac;
+    g_psx_cpu_oc_frac = (uint32_t)(v & 0xFFFFu);
+    v >>= 16;
+    return v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
+}
+
+/* Scale a device-busy latency the CPU issued (mult/div, GTE) so its completion
+ * deadline shrinks with the clock. Rounds up: a busy unit is never free. */
+static inline uint32_t psx_cpu_oc_scale_latency(uint32_t cpu_cycles) {
+    if (!g_psx_cpu_oc_q16) return cpu_cycles;
+    uint64_t v = ((uint64_t)cpu_cycles * g_psx_cpu_oc_q16 + 0xFFFFu) >> 16;
+    return v ? (uint32_t)v : 1u;
+}
+
 /* Advance guest time. Overlay DLLs forward this through their callback shim;
  * normal runtime/generated code keeps the common production path inlined. */
 #if defined(PSX_OVERLAY_DLL_BUILD)
@@ -78,8 +104,10 @@ void psx_advance_cycles(uint32_t cycles);
  * Watchdog / PC-sample throttles live in psx_devices_service_to_now (fired
  * on the HARD_CAP / event cadence, ≥ every 16K guest cycles) — not on every
  * per-instruction charge. MotK VLC issues millions of advances/s; two add+
- * branch pairs there were pure host tax. */
-static inline void psx_advance_cycles(uint32_t cycles) {
+ * branch pairs there were pure host tax.
+ *
+ * Takes device-timeline cycles; CPU charges go through psx_advance_cycles. */
+static inline void psx_advance_timeline_cycles(uint32_t cycles) {
 #if !defined(PSX_COSIM)
     if (g_psx_cyc_batch) {
         uint32_t b = g_psx_cyc_batch;
@@ -120,6 +148,37 @@ static inline void psx_advance_cycles(uint32_t cycles) {
         psx_devices_service_to_now();
     }
 #endif
+}
+
+/* Advance guest time by CPU cycles (plus any deferred CPU batch). With the
+ * overclock off this is exactly psx_advance_timeline_cycles. */
+static inline void psx_advance_cycles(uint32_t cycles) {
+    if (g_psx_cpu_oc_q16) {
+        uint64_t cpu = cycles;
+#if !defined(PSX_COSIM)
+        cpu += g_psx_cyc_batch;
+        g_psx_cyc_batch = 0;
+        g_psx_cyc_batch_limit = 0;
+#endif
+        psx_advance_timeline_cycles(psx_cpu_oc_scale(cpu));
+        return;
+    }
+    psx_advance_timeline_cycles(cycles);
+}
+
+/* Advance to a device-timeline distance (a mult/div or GTE completion, an
+ * idle skip to the next event). Deferred CPU work is published first at the
+ * CPU clock; the distance itself is never scaled. */
+static inline void psx_advance_device_cycles(uint32_t device_cycles) {
+#if !defined(PSX_COSIM)
+    if (g_psx_cpu_oc_q16 && g_psx_cyc_batch) {
+        uint32_t b = g_psx_cyc_batch;
+        g_psx_cyc_batch = 0;
+        g_psx_cyc_batch_limit = 0;
+        psx_advance_timeline_cycles(psx_cpu_oc_scale(b));
+    }
+#endif
+    psx_advance_timeline_cycles(device_cycles);
 }
 #endif
 

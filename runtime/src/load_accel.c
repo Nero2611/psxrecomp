@@ -160,7 +160,7 @@ int psx_vsync_query_hle_enter(CPUState* cpu, uint32_t func,
             if (cd > 64u && cd != 0xFFFFFFFFu) dist = cd;
         }
         if (dist > 64u && dist != 0xFFFFFFFFu && dist <= 1200000u) {
-            psx_advance_cycles(dist);
+            psx_advance_device_cycles(dist);
             if (horizon_kind == 2) {
                 s_extra_horizon_hits++;
                 s_extra_horizon_cycles += dist;

@@ -23,6 +23,9 @@
 uint64_t psx_cycle_count = 0;
 uint32_t g_psx_cyc_batch = 0;
 uint32_t g_psx_cyc_batch_limit = 0;
+/* CPU overclock ratio (Q16, 0 = off) and its sub-cycle remainder; see psx_cycles.h. */
+uint32_t g_psx_cpu_oc_q16 = 0;
+uint32_t g_psx_cpu_oc_frac = 0;
 int      g_psx_cyc_bb_defer = 0;
 uint32_t *g_psx_cyc_local_acc = NULL;
 static int      s_cycle_replay_active = 0;
@@ -552,7 +555,7 @@ void psx_idle_note_check(CPUState *cpu, uint32_t check_pc) {
     g_idle_skip_cycles += skip;
     g_idle_skip_last_pc = check_pc;
     g_idle_skip_last_quantum = q;
-    psx_advance_cycles((uint32_t)skip);  /* replays device events exactly */
+    psx_advance_device_cycles((uint32_t)skip);  /* replays device events exactly */
 
     /* Device servicing may have written RAM / raised I_STAT — the caller
      * (psx_check_interrupts) evaluates deliverability right after this with
@@ -674,7 +677,7 @@ uint32_t psx_mult_latency_u(uint32_t rs) {  /* MULTU (unsigned) */
 /* DIV/DIVU latency is the fixed constant 37 — emitted directly at the op site. */
 
 void psx_muldiv_set(CPUState* cpu, uint32_t latency) {
-    cpu->muldiv_ts_done = psx_cycle_count + (uint64_t)latency;
+    cpu->muldiv_ts_done = psx_cycle_count + (uint64_t)psx_cpu_oc_scale_latency(latency);
 }
 
 void psx_muldiv_stall(CPUState* cpu) {
@@ -693,7 +696,7 @@ void psx_muldiv_stall(CPUState* cpu) {
         uint8_t w = cpu->read_absorb_which;          /* fixed during the stall */
         uint32_t give = cpu->read_absorb[w];
         cpu->read_absorb[w] = (uint8_t)(give > stall ? give - stall : 0u);  /* consume */
-        psx_advance_cycles(stall);
+        psx_advance_device_cycles(stall);
     }
 }
 
@@ -710,7 +713,7 @@ void psx_gte_read(CPUState* cpu, uint32_t rt) {
     if (cpu->gte_ts_done > psx_cycle_count) {
         uint32_t stall = (uint32_t)(cpu->gte_ts_done - psx_cycle_count);
         cpu->ld_absorb = stall;
-        psx_advance_cycles(stall);
+        psx_advance_device_cycles(stall);
     } else {
         cpu->ld_absorb = 0u;
     }
@@ -770,9 +773,9 @@ void psx_gte_set(CPUState* cpu, uint32_t latency) {
     psx_cyc_batch_flush();
     /* Back-to-back GTE ops serialize: finish the prior op first. */
     if (cpu->gte_ts_done > psx_cycle_count) {
-        psx_advance_cycles((uint32_t)(cpu->gte_ts_done - psx_cycle_count));
+        psx_advance_device_cycles((uint32_t)(cpu->gte_ts_done - psx_cycle_count));
     }
-    cpu->gte_ts_done = psx_cycle_count + (uint64_t)latency;
+    cpu->gte_ts_done = psx_cycle_count + (uint64_t)psx_cpu_oc_scale_latency(latency);
 }
 
 void psx_gte_stall(CPUState* cpu) {
@@ -781,6 +784,6 @@ void psx_gte_stall(CPUState* cpu) {
      * that work in the stall and can arm a command deadline too early. */
     psx_cyc_batch_flush();
     if (cpu->gte_ts_done > psx_cycle_count) {
-        psx_advance_cycles((uint32_t)(cpu->gte_ts_done - psx_cycle_count));
+        psx_advance_device_cycles((uint32_t)(cpu->gte_ts_done - psx_cycle_count));
     }
 }

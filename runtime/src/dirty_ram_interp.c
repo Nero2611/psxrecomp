@@ -99,7 +99,9 @@ static inline void interp_cyc_step(CPUState *cpu, uint32_t reg_mask) {
         cpu->read_absorb[w]--;
     } else if (!g_ls_replay_active) {
         uint64_t next = psx_cycle_count + 1u;
-        if (!g_event_step_conservative && g_psx_cycle_fast_limit != 0u &&
+        if (g_psx_cpu_oc_q16) {   /* CPU overclock: charge through the scaler */
+            psx_advance_cycles(1u);
+        } else if (!g_event_step_conservative && g_psx_cycle_fast_limit != 0u &&
             next <= g_psx_cycle_fast_limit) {
             psx_cycle_count = next;
         } else {

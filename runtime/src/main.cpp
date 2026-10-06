@@ -1431,6 +1431,26 @@ extern "C" int psx_mod_set_native_vblank_rate(
     return 1;
 }
 
+extern "C" int psx_mod_set_cpu_overclock(uint32_t percent) {
+    if (percent < 100 || percent > 800) {
+        std::fprintf(stdout,
+            "psxrecomp: mod rejected invalid CPU overclock %u%%\n",
+            (unsigned)percent);
+        return 0;
+    }
+    /* Activation runs before the game boots, so no guest time has been
+     * charged at the old ratio yet. */
+    g_psx_cpu_oc_q16 = percent == 100
+        ? 0u
+        : (uint32_t)((65536u * 100u + percent / 2u) / percent);
+    g_psx_cpu_oc_frac = 0;
+    std::fprintf(stdout,
+        "psxrecomp: mod selected CPU overclock %u%% (%.4f MHz); devices, "
+        "timers and VBlank keep stock timing\n",
+        (unsigned)percent, 33.8688 * (double)percent / 100.0);
+    return 1;
+}
+
 extern "C" int psx_mod_set_frame_interpolation(
     uint32_t frames_per_second) {
     if (frames_per_second != 0 &&

@@ -19,6 +19,7 @@
 
 #define PKG_FAST "psx.enhancement.fast-loading"
 #define PKG_CD   "psx.enhancement.cd-speed"
+#define PKG_OC   "psx.enhancement.cpu-overclock"
 
 static long speed_option_number(const char* pkg, const char* feature,
                                 const char* id, long fallback) {
@@ -63,9 +64,19 @@ static void builtin_cd_speed_activate(void) {
         (unsigned)speed_option_number(PKG_CD, "cd-speed", "multiplier", 4), 0u);
 }
 
+/* Games that drop frames on real hardware (busy scenes over budget) run
+ * smoothly when the CPU gets more instructions per frame, as with
+ * DuckStation's CPU overclock. Everything but the CPU keeps stock timing. */
+static void builtin_cpu_overclock_activate(void) {
+    (void)psx_mod_set_cpu_overclock(
+        (unsigned)speed_option_number(PKG_OC, "cpu-overclock", "percent", 200));
+}
+
 PSX_MOD_CONSTRUCTOR(psx_register_builtin_speed_plugins) {
     (void)psx_mod_register_activation_plugin(
         "psx.fast-loading", builtin_fast_loading_activate);
     (void)psx_mod_register_activation_plugin(
         "psx.cd-speed", builtin_cd_speed_activate);
+    (void)psx_mod_register_activation_plugin(
+        "psx.cpu-overclock", builtin_cpu_overclock_activate);
 }

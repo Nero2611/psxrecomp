@@ -1,0 +1,36 @@
+format_version = 5
+id = "psx.enhancement.cpu-overclock"
+version = "1.0.0"
+name = "CPU Overclock"
+author = "psxrecomp"
+description = "Runs the emulated R3000A faster than its stock 33.8688 MHz while GPU, CD-ROM, SPU, timers and VBlank keep stock timing. Fixes slowdown in games that miss their frame budget on real hardware."
+resolver = "declarative"
+save_compatibility = "shared"
+
+# CPU speed is a property of the emulated hardware, not of any particular
+# disc, so this ships with the framework and applies to every game.
+[[target]]
+game_id = "*"
+
+[[feature]]
+id = "cpu-overclock"
+name = "CPU Overclock"
+description = "Disabled by default. Gives the game more CPU time per frame, like DuckStation's CPU overclock, so busy scenes that slowed down on a real PlayStation stay smooth. Not hardware-faithful: games that time themselves by CPU speed can run too fast or misbehave; turn it off if they do."
+group = "Performance"
+default_enabled = false
+
+[[option]]
+feature = "cpu-overclock"
+id = "percent"
+label = "CPU speed (% of stock)"
+description = "100 is stock speed. 200 doubles the CPU time available per frame; values up to 800 are accepted."
+group = "Performance"
+type = "integer"
+min = 100
+max = 800
+step = 25
+default = 200
+
+[[plugin]]
+feature = "cpu-overclock"
+id = "psx.cpu-overclock"

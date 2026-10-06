@@ -2050,6 +2050,10 @@ extern int g_event_step_conservative;
 extern int g_ls_replay_active;
 static inline void psx_load_charge_cycles(uint32_t cycles) {
     if (g_ls_replay_active || cycles == 0u) return;
+    if (g_psx_cpu_oc_q16) {   /* CPU overclock: charge through the scaler */
+        psx_advance_cycles(cycles);
+        return;
+    }
     uint64_t next = psx_cycle_count + (uint64_t)cycles;
     if (!g_event_step_conservative && g_psx_cycle_fast_limit != 0u &&
         next >= psx_cycle_count && next <= g_psx_cycle_fast_limit) {

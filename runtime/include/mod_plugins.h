@@ -220,6 +220,16 @@ int psx_mod_set_adaptive_display_aspect(uint32_t max_numerator,
 int psx_mod_set_native_vblank_rate(uint32_t frames_per_second);
 
 /*
+ * Overclock the emulated R3000A to percent of its stock 33.8688 MHz (100-800;
+ * 100 restores stock timing). CPU work reaches the shared device timeline
+ * scaled by 100/percent, so games that miss their frame budget on real
+ * hardware get more instructions per frame while GPU, CD-ROM, SPU, timers and
+ * VBlank keep their stock cadence. Like DuckStation's CPU overclock this is
+ * not hardware-faithful and can break games that rely on CPU speed.
+ */
+int psx_mod_set_cpu_overclock(uint32_t percent);
+
+/*
  * Enable presentation-only frame interpolation while leaving guest VBlank,
  * game logic, timers, and audio at their stock cadence. The OpenGL presenter
  * temporally blends completed guest frames at the requested output rate on its

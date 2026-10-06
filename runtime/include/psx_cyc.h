@@ -104,7 +104,8 @@ static inline void psx_cyc_charge(uint32_t cycles) {
         return;
     }
     if (psx_in_device_service) {
-        psx_cycle_count += (uint64_t)cycles;
+        psx_cycle_count += (uint64_t)(g_psx_cpu_oc_q16 ? psx_cpu_oc_scale(cycles)
+                                                       : cycles);
         return;
     }
 #if !defined(PSX_COSIM)
