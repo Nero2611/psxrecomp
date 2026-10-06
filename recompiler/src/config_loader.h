@@ -1185,6 +1185,13 @@ struct GameConfig {
     // function seeds, so they shape emitted shards and join the overlay cache
     // namespace: adding an entry must rebuild captures compiled without it.
     std::vector<std::array<uint32_t, 3>> overlay_declared_entries;
+
+    // [widescreen] hud43_rank_band: present the frontmost N ordering-table
+    // ranks (the title's fixed HUD) at exact 4:3 positions; -1 = off.
+    // [[widescreen.hud43_keep]] op/width/height (0 = any) exempts
+    // world-anchored overlays in those ranks. Runtime-only.
+    int ws_hud43_rank_band = -1;
+    std::vector<std::array<int, 3>> ws_hud43_keep;
 };
 
 // UserSettings — the launcher-written, user-editable override layer.

@@ -348,6 +348,14 @@ void psx_ws_note_gte_project(int nverts);
  * heuristic gameplay classification for native-wide presentation. */
 void gpu_ws_set_gameplay_state_gate(uint32_t addr,
                                     const uint32_t *values, int nvalues);
+/* [widescreen] hud43_rank_band / hud43_keep: present the primitives in the
+ * frontmost `band` ordering-table ranks at their exact 4:3 position (squash
+ * around the display centre), except those matching a keep entry (opcode
+ * plus optional width/height, 0 = any). band < 0 disables. Runtime-only. */
+void gpu_ws_set_hud43(int band, const uint8_t *keep_op, const int16_t *keep_w,
+                      const int16_t *keep_h, int keep_n);
+uint64_t gpu_ws_hud43_transforms(void);
+uint32_t gpu_ws_hud43_members(void);
 /* Native-wide HUD corner re-anchoring ([widescreen] nw_hud_corners): push
  * outer-third screen-space HUD primitives out to the true wide-frame corners
  * (they otherwise sit inset by the reveal). Runtime-only. Off by default. */

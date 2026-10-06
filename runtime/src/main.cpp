@@ -12900,6 +12900,21 @@ int main(int argc, char** argv) {
                 gc.ws_gameplay_state_addr,
                 gc.ws_gameplay_state_values.data(),
                 (int)gc.ws_gameplay_state_values.size());
+            /* [widescreen] hud43 — fixed HUD at exact 4:3 positions. */
+            {
+                uint8_t keep_op[8];
+                int16_t keep_w[8], keep_h[8];
+                int keep_n = 0;
+                for (const auto& k : gc.ws_hud43_keep) {
+                    if (keep_n == 8) break;
+                    keep_op[keep_n] = (uint8_t)k[0];
+                    keep_w[keep_n] = (int16_t)k[1];
+                    keep_h[keep_n] = (int16_t)k[2];
+                    keep_n++;
+                }
+                gpu_ws_set_hud43(gc.ws_hud43_rank_band, keep_op, keep_w,
+                                 keep_h, keep_n);
+            }
             /* Keep titles with known native-wide regressions on the original
              * projection-squash + stretched-present widescreen path. */
             g_ws_native_wide = gc.ws_native_wide ? 1 : 0;

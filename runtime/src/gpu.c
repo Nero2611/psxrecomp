@@ -2215,6 +2215,282 @@ static int32_t ws_hud_pivot(int32_t x, int32_t w) {
     return X + W / 2;
 }
 
+static void parse_vertex(uint32_t word, int32_t* x, int32_t* y);
+
+/* Screen extent of one GP0 drawing command in drawing space (pre draw
+ * offset). Polygons and lines use their position vertices, rectangles their
+ * origin plus encoded or fixed size. Returns 0 for non-drawing commands. */
+static int ws_cmd_bbox(const uint32_t *w, int32_t *x0, int32_t *x1,
+                       int32_t *y0, int32_t *y1) {
+    uint8_t op = (uint8_t)(w[0] >> 24);
+    int nv = 0, idx[4] = {0};
+    if (op >= 0x20u && op <= 0x3Fu) {
+        int stride = 1 + ((op & 0x10u) ? 1 : 0) + ((op & 0x04u) ? 1 : 0);
+        nv = (op & 0x08u) ? 4 : 3;
+        for (int i = 0; i < nv; i++) idx[i] = 1 + i * stride;
+    } else if (op >= 0x40u && op <= 0x5Fu) {
+        nv = 2; idx[0] = 1; idx[1] = (op & 0x10u) ? 3 : 2;
+    } else if (op >= 0x60u && op <= 0x7Fu) {
+        nv = 1; idx[0] = 1;
+    } else {
+        return 0;
+    }
+    int32_t lx = 0x7FFF, hx = -0x8000, ly = 0x7FFF, hy = -0x8000;
+    for (int i = 0; i < nv; i++) {
+        int32_t x, y;
+        parse_vertex(w[idx[i]], &x, &y);
+        if (x < lx) lx = x;
+        if (x > hx) hx = x;
+        if (y < ly) ly = y;
+        if (y > hy) hy = y;
+    }
+    if (op >= 0x60u) {
+        unsigned sel = (op >> 3) & 3u;
+        int32_t rw, rh;
+        if (sel == 0u) {
+            uint32_t sz = w[(op & 0x04u) ? 3 : 2];
+            rw = (int32_t)(sz & 0x3FFu);
+            rh = (int32_t)((sz >> 16) & 0x1FFu);
+        } else {
+            rw = rh = sel == 1u ? 1 : (sel == 2u ? 8 : 16);
+        }
+        hx = lx + rw;
+        hy = ly + rh;
+    }
+    *x0 = lx; *x1 = hx; *y0 = ly; *y1 = hy;
+    return 1;
+}
+
+/* [widescreen] hud43: present a title's fixed HUD exactly as in 4:3.
+ *
+ * Titles that keep the whole HUD in the frontmost ordering-table ranks get
+ * every primitive in [front - band, front] squashed around the display centre
+ * once the frame is stretched, so after the wide present the HUD lands at its
+ * authored 4:3 position and proportions, as one rigid layer: widget parts
+ * (dial + needle, map + markers) can no longer drift apart the way per-group
+ * anchoring lets them. World-anchored overlays sharing those ranks (floating
+ * name tags) are listed by opcode and size in hud43_keep and keep the
+ * ordinary per-group handling. Membership is decided by the same read-only
+ * linked-list prepass as auto_ui_squash, keyed by packet address. */
+#define WS_HUD43_KEEP_MAX 8
+#define WS_HUD43_SET_CAP  4096u            /* power of two */
+#define WS_HUD43_SCAN_CAP 16384u
+typedef struct {
+    uint32_t key;
+    uint16_t rank;
+    uint8_t  op;
+    int16_t  w, h;
+} WsHud43Scan;
+static int        ws_hud43_band = -1;      /* < 0: off */
+static int        ws_hud43_keep_n = 0;
+static uint8_t    ws_hud43_keep_op[WS_HUD43_KEEP_MAX];
+static int16_t    ws_hud43_keep_w[WS_HUD43_KEEP_MAX];
+static int16_t    ws_hud43_keep_h[WS_HUD43_KEEP_MAX];
+static uint32_t   ws_hud43_set[WS_HUD43_SET_CAP];   /* key + 1; 0 = empty */
+static uint32_t   ws_hud43_set_n = 0;
+static WsHud43Scan ws_hud43_scan[WS_HUD43_SCAN_CAP];
+static uint32_t   ws_hud43_scan_n = 0;
+static uint64_t   ws_hud43_transforms = 0;
+
+void gpu_ws_set_hud43(int band, const uint8_t *keep_op, const int16_t *keep_w,
+                      const int16_t *keep_h, int keep_n) {
+    ws_hud43_band = band;
+    if (keep_n > WS_HUD43_KEEP_MAX) keep_n = WS_HUD43_KEEP_MAX;
+    ws_hud43_keep_n = keep_n < 0 ? 0 : keep_n;
+    for (int i = 0; i < ws_hud43_keep_n; i++) {
+        ws_hud43_keep_op[i] = keep_op[i];
+        ws_hud43_keep_w[i] = keep_w[i];
+        ws_hud43_keep_h[i] = keep_h[i];
+    }
+}
+
+static int ws_hud43_configured(void) { return ws_hud43_band >= 0; }
+
+static uint32_t ws_hud43_slot(uint32_t key) {
+    return ((key >> 2) * 2654435761u) >> 20 & (WS_HUD43_SET_CAP - 1u);
+}
+
+static int ws_hud43_set_has(uint32_t key) {
+    uint32_t i = ws_hud43_slot(key);
+    for (uint32_t n = 0; n < WS_HUD43_SET_CAP; n++) {
+        uint32_t v = ws_hud43_set[(i + n) & (WS_HUD43_SET_CAP - 1u)];
+        if (v == 0) return 0;
+        if (v == key + 1u) return 1;
+    }
+    return 0;
+}
+
+static void ws_hud43_set_add(uint32_t key) {
+    if (ws_hud43_set_n >= WS_HUD43_SET_CAP / 2u) return;   /* keep probes short */
+    uint32_t i = ws_hud43_slot(key);
+    for (;;) {
+        uint32_t *v = &ws_hud43_set[i];
+        if (*v == key + 1u) return;
+        if (*v == 0) { *v = key + 1u; ws_hud43_set_n++; return; }
+        i = (i + 1u) & (WS_HUD43_SET_CAP - 1u);
+    }
+}
+
+static void ws_hud43_scan_reset(void) {
+    ws_hud43_scan_n = 0;
+    if (ws_hud43_set_n) {
+        memset(ws_hud43_set, 0, sizeof ws_hud43_set);
+        ws_hud43_set_n = 0;
+    }
+}
+
+static void ws_hud43_scan_note(const uint32_t *words, uint32_t src,
+                               uint16_t rank) {
+    if (!ws_hud43_configured() || ws_hud43_scan_n >= WS_HUD43_SCAN_CAP) return;
+    int32_t x0, x1, y0, y1;
+    if (!ws_cmd_bbox(words, &x0, &x1, &y0, &y1)) return;
+    WsHud43Scan *s = &ws_hud43_scan[ws_hud43_scan_n++];
+    s->key = GPU_RAM_KEY(src);
+    s->rank = rank;
+    s->op = (uint8_t)(words[0] >> 24);
+    s->w = (int16_t)(x1 - x0);
+    s->h = (int16_t)(y1 - y0);
+}
+
+/* After the linked-list walk: the front rank is the highest rank holding a
+ * drawing command; admit the band below it minus the keep list. */
+static void ws_hud43_scan_finish(void) {
+    if (!ws_hud43_configured() || ws_hud43_scan_n == 0) return;
+    uint16_t front = 0;
+    for (uint32_t i = 0; i < ws_hud43_scan_n; i++)
+        if (ws_hud43_scan[i].rank != 0xFFFFu && ws_hud43_scan[i].rank > front)
+            front = ws_hud43_scan[i].rank;
+    int lo = (int)front - ws_hud43_band;
+    for (uint32_t i = 0; i < ws_hud43_scan_n; i++) {
+        const WsHud43Scan *s = &ws_hud43_scan[i];
+        if (s->rank == 0xFFFFu || (int)s->rank < lo) continue;
+        int keep = 0;
+        for (int k = 0; k < ws_hud43_keep_n && !keep; k++)
+            keep = s->op == ws_hud43_keep_op[k] &&
+                   (!ws_hud43_keep_w[k] || s->w == ws_hud43_keep_w[k]) &&
+                   (!ws_hud43_keep_h[k] || s->h == ws_hud43_keep_h[k]);
+        if (!keep) ws_hud43_set_add(s->key);
+    }
+}
+
+/* True when the command being executed belongs to this frame's fixed HUD. */
+static int ws_hud43_member(void) {
+    if (!ws_hud43_configured() || !ws_active() ||
+        gp0_cmd_source_addr == 0xFFFFFFFFu || ws_hud43_set_n == 0)
+        return 0;
+    return ws_hud43_set_has(GPU_RAM_KEY(gp0_cmd_source_addr));
+}
+
+static int32_t ws_hud43_centre(void) { return ws_disp_x() + ws_disp_w() / 2; }
+
+/* Projected-vertex sets: every SXY the GTE produced in this and the previous
+ * frame (packets are built one frame and drawn the next). A HUD polygon whose
+ * corners ALL came out of RTPS/RTPT (a dial needle rotated through the GTE)
+ * already carries the projection squash; squashing it again would pull it off
+ * its widget. Requiring every corner keeps chance matches of CPU-placed
+ * corners against world vertices negligible. */
+#define WS_GTE_SXY_CAP 16384u                /* power of two, per generation */
+static uint32_t ws_gte_sxy[2][WS_GTE_SXY_CAP]; /* masked word + 1; 0 = empty */
+static uint32_t ws_gte_sxy_n[2];
+static uint32_t ws_gte_sxy_frame = 0xFFFFFFFFu;
+static int      ws_gte_sxy_cur = 0;
+
+static uint32_t ws_gte_sxy_slot(uint32_t key) {
+    return (key * 2654435761u) >> 18 & (WS_GTE_SXY_CAP - 1u);
+}
+
+void psx_ws_note_gte_sxy(uint32_t packed) {
+    if (!ws_hud43_configured()) return;
+    uint32_t f = (uint32_t)s_frame_count;
+    if (f != ws_gte_sxy_frame) {
+        ws_gte_sxy_cur ^= 1;
+        if (ws_gte_sxy_n[ws_gte_sxy_cur]) {
+            memset(ws_gte_sxy[ws_gte_sxy_cur], 0, sizeof ws_gte_sxy[0]);
+            ws_gte_sxy_n[ws_gte_sxy_cur] = 0;
+        }
+        /* A gap of more than one frame leaves the other set stale. */
+        if (f != ws_gte_sxy_frame + 1u && ws_gte_sxy_n[ws_gte_sxy_cur ^ 1]) {
+            memset(ws_gte_sxy[ws_gte_sxy_cur ^ 1], 0, sizeof ws_gte_sxy[0]);
+            ws_gte_sxy_n[ws_gte_sxy_cur ^ 1] = 0;
+        }
+        ws_gte_sxy_frame = f;
+    }
+    int g = ws_gte_sxy_cur;
+    if (ws_gte_sxy_n[g] >= WS_GTE_SXY_CAP / 2u) return;
+    uint32_t key = packed & 0x07FF07FFu;
+    uint32_t i = ws_gte_sxy_slot(key);
+    for (;;) {
+        uint32_t *v = &ws_gte_sxy[g][i];
+        if (*v == key + 1u) return;
+        if (*v == 0) { *v = key + 1u; ws_gte_sxy_n[g]++; return; }
+        i = (i + 1u) & (WS_GTE_SXY_CAP - 1u);
+    }
+}
+
+static int ws_gte_sxy_seen(uint32_t word) {
+    uint32_t key = word & 0x07FF07FFu;
+    for (int g = 0; g < 2; g++) {
+        if (!ws_gte_sxy_n[g]) continue;
+        uint32_t i = ws_gte_sxy_slot(key);
+        for (uint32_t n = 0; n < WS_GTE_SXY_CAP; n++) {
+            uint32_t v = ws_gte_sxy[g][(i + n) & (WS_GTE_SXY_CAP - 1u)];
+            if (v == 0) break;
+            if (v == key + 1u) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Polygons and two-point lines: squash the packet's position words in place
+ * before dispatch, so every handler draws the 4:3 geometry (texture UVs are
+ * untouched, so the texels squash with it). Rectangles go through
+ * ws_hud43_rect, which keeps full texel coverage via the scaled-rect path. */
+static void ws_hud43_apply_packet(void) {
+    uint8_t op = (uint8_t)(gp0_cmd_buf[0] >> 24);
+    if (op < 0x20u || op > 0x5Fu || (op >= 0x48u && op <= 0x4Fu) ||
+        op >= 0x58u || !ws_hud43_member())
+        return;
+    int nv, idx[4] = {0};
+    if (op <= 0x3Fu) {
+        int stride = 1 + ((op & 0x10u) ? 1 : 0) + ((op & 0x04u) ? 1 : 0);
+        nv = (op & 0x08u) ? 4 : 3;
+        for (int i = 0; i < nv; i++) idx[i] = 1 + i * stride;
+    } else {
+        nv = 2; idx[0] = 1; idx[1] = (op & 0x10u) ? 3 : 2;
+    }
+    int projected = 1;
+    for (int i = 0; i < nv && projected; i++)
+        projected = ws_gte_sxy_seen(gp0_cmd_buf[idx[i]]);
+    if (projected) return;   /* GTE output: already squashed by projection */
+    int32_t cx = ws_hud43_centre();
+    for (int i = 0; i < nv; i++) {
+        int32_t x, y;
+        parse_vertex(gp0_cmd_buf[idx[i]], &x, &y);
+        x = ws_scale_about(x, cx);
+        gp0_cmd_buf[idx[i]] = (gp0_cmd_buf[idx[i]] & 0xFFFF0000u) |
+                              ((uint32_t)x & 0xFFFFu);
+    }
+    ws_hud43_transforms++;
+}
+
+/* Rectangles: squash origin around the display centre; returns the squashed
+ * draw width, or 0 when the command is not part of the fixed HUD. */
+static int ws_hud43_rect(int32_t *x0, int w) {
+    if (w <= 0 || !ws_hud43_member()) return 0;
+    /* Squash both edges and derive the width from them: rounding origin and
+     * width separately left 1 px seams between abutting HUD tiles (the
+     * 508-wide display puts the centre between texel columns). */
+    int32_t c = ws_hud43_centre();
+    int32_t l = ws_scale_about(*x0, c);
+    int32_t r = ws_scale_about(*x0 + w, c);
+    *x0 = l;
+    ws_hud43_transforms++;
+    return r - l > 0 ? (int)(r - l) : 1;
+}
+
+uint64_t gpu_ws_hud43_transforms(void) { return ws_hud43_transforms; }
+uint32_t gpu_ws_hud43_members(void) { return ws_hud43_set_n; }
+
 /* Automatic UI correction is deliberately tied to draw provenance, not to
  * primitive size or "does this look 2D?" guesses. Ape's ordering table submits
  * HUD/font/icon packets in the final layer, after every depth-sorted world
@@ -2232,7 +2508,7 @@ static void ws_ui_prepass_invalidate_stale(void) {
 
 static int ws_auto_ui_anchor(int32_t *out_anchor) {
     if (!ws_auto_ui_squash || !ws_active() ||
-        gp0_cmd_source_addr == 0xFFFFFFFFu)
+        gp0_cmd_source_addr == 0xFFFFFFFFu || ws_hud43_member())
         return 0;
     uint32_t src = GPU_RAM_KEY(gp0_cmd_source_addr);
     for (uint32_t i = 0; i < ws_ui_prepass_count; i++) {
@@ -2330,6 +2606,8 @@ static int ws_auto_ui_transform_rect(int32_t *x, int32_t y, int *w, int h) {
  * return the squashed draw width, or 0 = no change. */
 static int ws_sprt_fixed_transform(int32_t *x0, int32_t y0, int w) {
     if (!ws_active()) return 0;
+    int hud43_w = ws_hud43_rect(x0, w);
+    if (hud43_w) return hud43_w;
     int32_t ax;
     if (ws_tagged_anchor(&ax)) {
         *x0 = ws_scale_about(*x0, ax);
@@ -4382,7 +4660,10 @@ static void gp0_exec_mono_rect(void) {
      * primitive, and rects never carry GTE output. */
     if (ws_active() && w > 0) {
         int corrected_w = w;
-        if (ws_auto_ui_transform_rect(&x0, y0, &corrected_w, h))
+        int hud43_w = ws_hud43_rect(&x0, w);
+        if (hud43_w)
+            w = hud43_w;
+        else if (ws_auto_ui_transform_rect(&x0, y0, &corrected_w, h))
             w = corrected_w;
     }
     x0 += ws_nw_hud_shift(x0, w);   /* native-wide HUD corner re-anchor (no-op else) */
@@ -4442,7 +4723,10 @@ static void gp0_exec_textured_rect(void) {
     int ws_w = 0;
     if (ws_active() && w > 0) {
         int32_t ws_ax;
-        if (ws_tagged_anchor(&ws_ax)) {
+        int hud43_w = ws_hud43_rect(&x0, w);
+        if (hud43_w) {
+            ws_w = hud43_w;
+        } else if (ws_tagged_anchor(&ws_ax)) {
             x0 = ws_scale_about(x0, ws_ax);
             ws_w = (int)ws_scale_len(w);
         } else {
@@ -5048,6 +5332,92 @@ static void ws_ui_prepass_add(const uint32_t *words, uint32_t word_count,
     item->packet_guard = ws_prepass_packet_guard(words, word_count);
 }
 
+#ifndef PSX_NO_DEBUG_TOOLS
+/* Ordering-table census of the current frame's DMA linked lists: every
+ * command with its OT rank, list index and screen extent, so a title's HUD
+ * layering can be read from data (TCP ws_ot_dump). Reset per frame. */
+#define WS_OT_DBG_CAP 16384u
+typedef struct {
+    uint32_t src;
+    uint16_t rank;
+    uint8_t  list, op;
+    int16_t  xmin, xmax, ymin, ymax;
+} WsOtDbg;
+static WsOtDbg  ws_ot_dbg[WS_OT_DBG_CAP];
+static uint32_t ws_ot_dbg_n = 0;
+static uint32_t ws_ot_dbg_frame = 0xFFFFFFFFu;
+static uint8_t  ws_ot_dbg_list = 0;
+
+static void ws_ot_dbg_begin_list(void) {
+    uint32_t f = (uint32_t)s_frame_count;
+    if (f != ws_ot_dbg_frame) {
+        ws_ot_dbg_frame = f;
+        ws_ot_dbg_n = 0;
+        ws_ot_dbg_list = 0;
+    } else {
+        ws_ot_dbg_list++;
+    }
+}
+
+static void ws_ot_dbg_note(const uint32_t *w, uint32_t src, uint16_t rank) {
+    if (ws_ot_dbg_n >= WS_OT_DBG_CAP) return;
+    uint8_t op = (uint8_t)(w[0] >> 24);
+    int32_t lo_x = 0x7FFF, hi_x = -0x8000, lo_y = 0x7FFF, hi_y = -0x8000;
+    int nv = 0, idx[4] = {0};
+    if (op >= 0x20u && op <= 0x3Fu) {
+        int stride = 1 + ((op & 0x10u) ? 1 : 0) + ((op & 0x04u) ? 1 : 0);
+        nv = (op & 0x08u) ? 4 : 3;
+        for (int i = 0; i < nv; i++) idx[i] = 1 + i * stride;
+    } else if (op >= 0x40u && op <= 0x5Fu) {
+        nv = 2; idx[0] = 1; idx[1] = (op & 0x10u) ? 3 : 2;
+    } else if (op >= 0x60u && op <= 0x7Fu) {
+        nv = 1; idx[0] = 1;
+    }
+    for (int i = 0; i < nv; i++) {
+        int32_t x, y;
+        parse_vertex(w[idx[i]], &x, &y);
+        if (x < lo_x) lo_x = x;
+        if (x > hi_x) hi_x = x;
+        if (y < lo_y) lo_y = y;
+        if (y > hi_y) hi_y = y;
+    }
+    if (op >= 0x60u && op <= 0x7Fu) {
+        unsigned sel = (op >> 3) & 3u;
+        int32_t rw, rh;
+        if (sel == 0u) {
+            uint32_t sz = w[(op & 0x04u) ? 3 : 2];
+            rw = (int32_t)(sz & 0x3FFu);
+            rh = (int32_t)((sz >> 16) & 0x1FFu);
+        } else {
+            rw = rh = sel == 1u ? 1 : (sel == 2u ? 8 : 16);
+        }
+        hi_x = lo_x + rw;
+        hi_y = lo_y + rh;
+    }
+    WsOtDbg *e = &ws_ot_dbg[ws_ot_dbg_n++];
+    e->src = GPU_RAM_KEY(src);
+    e->rank = rank;
+    e->list = ws_ot_dbg_list;
+    e->op = op;
+    e->xmin = (int16_t)lo_x; e->xmax = (int16_t)hi_x;
+    e->ymin = (int16_t)lo_y; e->ymax = (int16_t)hi_y;
+}
+
+int gpu_ws_ot_dump(const char *path) {
+    FILE *fp = fopen(path, "w");
+    if (!fp) return -1;
+    fprintf(fp, "frame,list,rank,src,op,xmin,xmax,ymin,ymax,hud43\n");
+    for (uint32_t i = 0; i < ws_ot_dbg_n; i++) {
+        const WsOtDbg *e = &ws_ot_dbg[i];
+        fprintf(fp, "%u,%u,%u,0x%08X,0x%02X,%d,%d,%d,%d,%d\n", ws_ot_dbg_frame,
+                e->list, e->rank, e->src, e->op, e->xmin, e->xmax,
+                e->ymin, e->ymax, ws_hud43_set_has(e->src));
+    }
+    fclose(fp);
+    return (int)ws_ot_dbg_n;
+}
+#endif
+
 void gpu_ws_prepass_linked_list(uint32_t start_addr) {
     ws_ui_prepass_count = 0;
     ws_ui_prepass_node_count = 0;
@@ -5057,7 +5427,11 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
         ws_ui_reject.too_big = ws_ui_reject.cap = ws_ui_reject.rank =
         ws_ui_reject.stale = 0;
     ws_ui_rankdrop_count = 0;
-    if (!ws_auto_ui_squash || !ws_active()) return;
+    ws_hud43_scan_reset();
+    if ((!ws_auto_ui_squash && !ws_hud43_configured()) || !ws_active()) return;
+#ifndef PSX_NO_DEBUG_TOOLS
+    ws_ot_dbg_begin_list();
+#endif
 
     uint32_t addr = psx_mod_gpu_dma_resolve_address(start_addr);
     uint32_t safety = 0;
@@ -5113,9 +5487,14 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
                         psx_mod_gpu_dma_resolve_address(
                             word_addr + (offset + (uint32_t)i) * 4u));
                 }
-                ws_ui_prepass_add(words, (uint32_t)count,
-                    psx_mod_gpu_dma_resolve_address(
-                        word_addr + offset * 4u), rank);
+                uint32_t cmd_addr = psx_mod_gpu_dma_resolve_address(
+                    word_addr + offset * 4u);
+#ifndef PSX_NO_DEBUG_TOOLS
+                ws_ot_dbg_note(words, cmd_addr, rank);
+#endif
+                ws_hud43_scan_note(words, cmd_addr, rank);
+                if (ws_auto_ui_squash)
+                    ws_ui_prepass_add(words, (uint32_t)count, cmd_addr, rank);
                 offset += (uint32_t)count;
             }
         }
@@ -5124,6 +5503,7 @@ void gpu_ws_prepass_linked_list(uint32_t start_addr) {
         if (next == 0xFFFFFFu) break;
         addr = psx_mod_gpu_dma_resolve_address(next);
     }
+    ws_hud43_scan_finish();
     if (ws_ui_prepass_count == 0) {
         ws_ui_prepass_count = 0;
         return;
@@ -5366,6 +5746,7 @@ typedef struct {
     int16_t  base_x;      /* back-buffer origin (draw_area_left) at draw time */
     uint8_t  opcode;
     uint8_t  tagged;      /* psx_ws_prim_is_tagged() at draw time */
+    uint8_t  gte_verts;   /* polygon position verts with PGXP GTE provenance */
 } WsCensusEntry;
 static WsCensusEntry *ws_census = NULL;
 static uint64_t       ws_census_seq = 0;
@@ -5425,6 +5806,29 @@ static void ws_note_overhang(uint8_t op) {
     }
 }
 
+/* Polygon position vertices whose packet word carries a GTE projection
+ * (PGXP dataflow/fallback provenance). 0 for non-polygons or when PGXP is
+ * off. Distinguishes projected world geometry from screen-space 2D. */
+static uint8_t prim_gte_vertex_count(uint8_t op) {
+    if (op < 0x20 || op > 0x3F || !pgxp_enabled() ||
+        gp0_cmd_source_addr == 0xFFFFFFFFu)
+        return 0;
+    int nv     = (op & 0x08) ? 4 : 3;
+    int stride = 1 + ((op & 0x10) ? 1 : 0) + ((op & 0x04) ? 1 : 0);
+    uint8_t n = 0;
+    for (int i = 0; i < nv; i++) {
+        int widx = 1 + i * stride;
+        uint32_t word = gp0_cmd_buf[widx];
+        int32_t rx, ry, px, py;
+        uint16_t sz;
+        parse_vertex(word, &rx, &ry);
+        if (pgxp_get_precise_vertex(gp0_cmd_source_addr + (uint32_t)widx * 4u,
+                                    word, rx, ry, &px, &py, &sz) != PGXP_SRC_NATIVE)
+            n++;
+    }
+    return n;
+}
+
 static void ws_census_record(uint8_t opcode, int32_t x, int32_t y) {
     if (!ws_census_on) return;
     if (!ws_census) {
@@ -5445,6 +5849,7 @@ static void ws_census_record(uint8_t opcode, int32_t x, int32_t y) {
     e->base_x   = (int16_t)draw_area_left;
     e->opcode   = opcode;
     e->tagged   = (uint8_t)psx_ws_prim_is_tagged();
+    e->gte_verts = prim_gte_vertex_count(opcode);
     ws_census_seq++;
 }
 
@@ -5453,7 +5858,7 @@ int gpu_ws_census_dump(uint32_t f0, uint32_t f1, const char *path) {
     if (!ws_census) return 0;
     FILE *fp = fopen(path, "w");
     if (!fp) return -1;
-    fprintf(fp, "frame,src_addr,cam_x,cam_y,x,y,xmin,xmax,base_x,opcode,tagged\n");
+    fprintf(fp, "frame,src_addr,cam_x,cam_y,x,y,xmin,xmax,base_x,opcode,tagged,gte_verts\n");
     uint64_t total = ws_census_seq;
     uint64_t avail = total < WS_CENSUS_CAP ? total : WS_CENSUS_CAP;
     uint64_t start = total - avail;
@@ -5461,9 +5866,10 @@ int gpu_ws_census_dump(uint32_t f0, uint32_t f1, const char *path) {
     for (uint64_t s = start; s < total; s++) {
         WsCensusEntry *e = &ws_census[s & (WS_CENSUS_CAP - 1)];
         if (e->frame < f0 || e->frame > f1) continue;
-        fprintf(fp, "%u,0x%08X,%d,%d,%d,%d,%d,%d,%d,0x%02X,%u\n",
+        fprintf(fp, "%u,0x%08X,%d,%d,%d,%d,%d,%d,%d,0x%02X,%u,%u\n",
                 e->frame, e->src_addr, e->cam_x, e->cam_y, e->x, e->y,
-                e->xmin, e->xmax, e->base_x, e->opcode, e->tagged);
+                e->xmin, e->xmax, e->base_x, e->opcode, e->tagged,
+                e->gte_verts);
         n++;
     }
     fclose(fp);
@@ -5487,6 +5893,7 @@ static void gp0_execute_command(void) {
         parse_vertex(gp0_cmd_buf[1], &cvx, &cvy);
         ws_census_record(opcode, cvx, cvy);
         ws_note_overhang(opcode);   /* 2D-only-scene classifier world signal */
+        ws_hud43_apply_packet();    /* fixed HUD polygons/lines -> 4:3 (no-op else) */
     }
 
     /* Categorize for diagnostics */

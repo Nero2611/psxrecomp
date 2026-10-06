@@ -8198,6 +8198,24 @@ static void handle_ws_census(int id, const char *json)
              id, n, path, (unsigned long long)gpu_ws_census_seq());
 }
 
+#ifndef PSX_NO_DEBUG_TOOLS
+/* {"cmd":"ws_ot_dump","out":"path.csv"} — the current frame's ordering-table
+ * census (every GP0 command with OT rank, list index and screen extent). */
+static void handle_ws_ot_dump(int id, const char *json)
+{
+    extern int gpu_ws_ot_dump(const char *path);
+    char path[256];
+    if (!json_get_str(json, "out", path, sizeof(path)))
+        snprintf(path, sizeof(path), "psx_ot.csv");
+    int n = gpu_ws_ot_dump(path);
+    if (n < 0) { send_err(id, "ot dump: cannot open file"); return; }
+    send_fmt("{\"id\":%d,\"ok\":true,\"rows\":%d,\"path\":\"%s\","
+             "\"hud43_members\":%u,\"hud43_transforms\":%llu}",
+             id, n, path, (unsigned)gpu_ws_hud43_members(),
+             (unsigned long long)gpu_ws_hud43_transforms());
+}
+#endif
+
 static void handle_mmx6_freshfix(int id, const char *json)
 {
     extern void gpu_ws_mmx6_set_freshfix(int on);
@@ -13845,6 +13863,9 @@ static const CmdEntry s_commands[] = {
     { "ws_dome",           handle_ws_dome },
     { "ws_dome_probe",     handle_ws_dome_probe },
     { "ws_census",         handle_ws_census },
+#ifndef PSX_NO_DEBUG_TOOLS
+    { "ws_ot_dump",        handle_ws_ot_dump },
+#endif
     { "mmx6_freshfix",     handle_mmx6_freshfix },
     { "mem_words",         handle_mem_words },
     { "vram_peek",         handle_vram_peek },

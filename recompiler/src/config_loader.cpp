@@ -2293,6 +2293,38 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*ws_bg2d_packet_cap*/    ws_bg2d_packet_cap,
     };
     out.overlay_declared_entries = parse_overlay_declared_entries(cfg);
+    if (cfg.contains("widescreen")) {
+        const toml::value& ws = toml::find(cfg, "widescreen");
+        if (ws.contains("hud43_rank_band")) {
+            const int64_t band = toml::find<int64_t>(ws, "hud43_rank_band");
+            if (band < 0 || band > 4096)
+                throw std::runtime_error(fmt::format(
+                    "{}: [widescreen] hud43_rank_band must be 0..4096",
+                    config_path.string()));
+            out.ws_hud43_rank_band = (int)band;
+        }
+        if (ws.contains("hud43_keep")) {
+            const toml::value& keep = toml::find(ws, "hud43_keep");
+            if (!keep.is_array())
+                throw std::runtime_error(fmt::format(
+                    "{}: [widescreen] hud43_keep must be an array of tables",
+                    config_path.string()));
+            for (const toml::value& k : keep.as_array()) {
+                const uint32_t op = parse_hex(toml::find<std::string>(k, "op"),
+                                              "widescreen.hud43_keep.op");
+                const int w = k.contains("width")
+                    ? (int)toml::find<int64_t>(k, "width") : 0;
+                const int h = k.contains("height")
+                    ? (int)toml::find<int64_t>(k, "height") : 0;
+                if (op < 0x20u || op > 0x7Fu || w < 0 || h < 0 ||
+                    w > 1023 || h > 511)
+                    throw std::runtime_error(fmt::format(
+                        "{}: [widescreen] hud43_keep needs op 0x20..0x7F and "
+                        "width/height 0..1023/511", config_path.string()));
+                out.ws_hud43_keep.push_back({(int)op, w, h});
+            }
+        }
+    }
     return out;
 }
 

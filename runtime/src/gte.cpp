@@ -191,6 +191,7 @@ static void depth_cue_from_ir(GTEState* gte, uint32_t instr) {
 static int32_t s_ws_xnum = 1, s_ws_xden = 1;
 extern "C" int gpu_ws_present_native_43(void);  /* gpu.c — suppress on 4:3 frames */
 extern "C" void psx_ws_note_gte_project(int nverts);  /* gpu.c — gte_game_mode stamp */
+extern "C" void psx_ws_note_gte_sxy(uint32_t packed);  /* gpu.c — hud43 projected-vertex set */
 static int s_gte_replay_sandbox = 0;
 
 /* Optional visual-only geometry precision cache. The PS1-visible SXY FIFO
@@ -903,6 +904,7 @@ void gte_rtps_internal(GTEState* gte, int16_t* V, bool setMac0, uint32_t instr) 
         int64_t cy16 = sy16 < -kLim ? -kLim : (sy16 > kLim - 1 ? kLim - 1 : sy16);
         pgxp_gte_push_sxy((int32_t)cx16, (int32_t)cy16, gte->SZ[3],
                           (uint32_t)gte->SXY[2]);
+        psx_ws_note_gte_sxy((uint32_t)gte->SXY[2]);
     }
     geom_note((uint32_t)gte->SXY[2], sx16, sy16);
 
