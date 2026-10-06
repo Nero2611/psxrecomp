@@ -113,7 +113,7 @@
  * (entry, CRC, ranges) identity.  Offline publishers parse this same literal
  * before adding a cache pair so compiler-side accounting cannot drift from
  * the loader's fixed arrays. */
-#define PSX_OVERLAY_CANDIDATE_CAP 32768
+#define PSX_OVERLAY_CANDIDATE_CAP 65536
 
 /* Codegen flavor of the recompiled output the overlays + runtime were built
  * against. Overlays are keyed in the cache by guest-bytes CRC, which is
