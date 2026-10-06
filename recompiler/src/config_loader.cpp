@@ -187,6 +187,16 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
         h.u32((uint32_t)lcb.size());
         for (uint32_t pc : lcb) h.u32(pc);
     }
+    // Only declared entries change the hash, so titles without [[overlays]]
+    // keep their existing cache namespace.
+    if (!c.overlay_declared_entries.empty()) {
+        std::vector<std::array<uint32_t, 3>> ents = c.overlay_declared_entries;
+        std::sort(ents.begin(), ents.end());
+        ents.erase(std::unique(ents.begin(), ents.end()), ents.end());
+        h.tag("overlay_declared_entries");
+        h.u32((uint32_t)ents.size());
+        for (const auto& e : ents) { h.u32(e[0]); h.u32(e[1]); h.u32(e[2]); }
+    }
     return h.value;
 }
 
@@ -1131,6 +1141,49 @@ BiosConfig load_bios_config(const fs::path& config_path_in) {
         /*shell_entry_phys*/  shell_entry_phys,
         /*deliver_event_ret*/ deliver_event_ret,
     };
+}
+
+// [[overlays]] declared entries, read with the same keys and value forms as
+// compile_overlays.py (_collect_toml_overlay_entries): hex strings or integers,
+// single values or arrays, optionally qualified by load_addr and bytes_crc.
+static uint32_t overlay_addr_value(const toml::value& v, const std::string& field) {
+    if (v.is_integer()) return (uint32_t)v.as_integer();
+    if (v.is_string()) return parse_hex(v.as_string(), field);
+    throw std::runtime_error(
+        fmt::format("config field '{}': expected hex string or integer", field));
+}
+
+static std::vector<std::array<uint32_t, 3>> parse_overlay_declared_entries(
+        const toml::value& cfg) {
+    std::vector<std::array<uint32_t, 3>> out;
+    if (!cfg.contains("overlays")) return out;
+    const toml::value& ovs = toml::find(cfg, "overlays");
+    if (!ovs.is_array()) return out;
+    for (const toml::value& ov : ovs.as_array()) {
+        if (!ov.is_table()) continue;
+        uint32_t load = 0, crc = 0;
+        for (const char* k : {"load_addr", "load_address"}) {
+            if (!ov.contains(k)) continue;
+            load = overlay_addr_value(toml::find(ov, k), "overlays.load_addr");
+            break;
+        }
+        for (const char* k : {"bytes_crc", "crc32", "crc"}) {
+            if (!ov.contains(k)) continue;
+            crc = overlay_addr_value(toml::find(ov, k), "overlays.bytes_crc");
+            break;
+        }
+        for (const char* k : {"entry", "entries", "function_entry_pcs", "function_entries"}) {
+            if (!ov.contains(k)) continue;
+            const toml::value& v = toml::find(ov, k);
+            if (v.is_array()) {
+                for (const toml::value& e : v.as_array())
+                    out.push_back({load, crc, overlay_addr_value(e, "overlays.entries")});
+            } else {
+                out.push_back({load, crc, overlay_addr_value(v, "overlays.entries")});
+            }
+        }
+    }
+    return out;
 }
 
 GameConfig load_game_config(const fs::path& config_path_in) {
@@ -2123,7 +2176,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         }
     }
 
-    return GameConfig{
+    GameConfig out{
         /*config_path*/      config_path,
         /*project_root*/     root,
         /*name*/             name,
@@ -2239,6 +2292,8 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*ws_bg2d_init_func*/     ws_bg2d_init_func,
         /*ws_bg2d_packet_cap*/    ws_bg2d_packet_cap,
     };
+    out.overlay_declared_entries = parse_overlay_declared_entries(cfg);
+    return out;
 }
 
 // ---- GameOptions (game_options.toml) — the game's own native settings ----

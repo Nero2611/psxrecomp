@@ -1178,6 +1178,13 @@ struct GameConfig {
     //   reveal pixels once before the new stage background is submitted.
     uint32_t ws_bg2d_init_func    = 0;
     uint32_t ws_bg2d_packet_cap       = 1000;
+
+    // [[overlays]] declared entries (entry/entries/function_entry_pcs/
+    // function_entries), flattened as (load_addr, bytes_crc, entry) triples
+    // with 0 for an absent qualifier. compile_overlays.py reads them as extra
+    // function seeds, so they shape emitted shards and join the overlay cache
+    // namespace: adding an entry must rebuild captures compiled without it.
+    std::vector<std::array<uint32_t, 3>> overlay_declared_entries;
 };
 
 // UserSettings — the launcher-written, user-editable override layer.

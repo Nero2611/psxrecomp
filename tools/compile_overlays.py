@@ -2245,10 +2245,20 @@ def patch_generated_c(src: str, load_addr: int, size: int) -> str:
     else:
         src = src[:last_inc] + '\n' + DISPATCH_PREAMBLE + src[last_inc:]
 
-    # 2. Remove out-of-range forward declarations
+    # 2. Remove out-of-range forward declarations. In-range ones get the same
+    #    export attribute as their definitions (step 4): clang rejects adding
+    #    dllexport on a definition once an earlier plain declaration was used,
+    #    which happens when a declared entry splits a function so a caller
+    #    precedes its callee's definition.
     def drop_extern(m):
         addr = int(m.group(1), 16)
-        return '' if not in_overlay(addr) else m.group(0)
+        if not in_overlay(addr):
+            return ''
+        return (
+            '#ifdef _WIN32\n__declspec(dllexport)\n#else\n'
+            '__attribute__((visibility("default")))\n#endif\n'
+            + m.group(0)
+        )
     src = re.sub(r'^void func_([0-9A-Fa-f]{8})\(CPUState\* cpu\);\n',
                  drop_extern, src, flags=re.MULTILINE)
 
