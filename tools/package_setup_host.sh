@@ -540,6 +540,17 @@ if [[ -f "${STAGE}/CMakeLists.txt" ]]; then
   # here — silently, before any gate can report anything. Guard the assignment.
   guarded="$( { grep -oE 'if\(EXISTS[[:space:]]+"\$\{CMAKE_CURRENT_SOURCE_DIR\}/[^"]+"' "${cml}" \
                   || true; } | sed -E 's|.*\$\{CMAKE_CURRENT_SOURCE_DIR\}/||; s|"$||' | sort -u)"
+  # The static overlay shard is generated from the player's own disc by
+  # Generate (aot/overlays.json "static_output"), so it is never shipped and
+  # its absence here is correct. overlay_static_sources.cmake keeps a missing
+  # shard legal at configure.
+  static_output=""
+  if [[ -f "${STAGE}/aot/overlays.json" ]]; then
+    static_output="$(python3 -c 'import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("static_output", ""))' \
+                       "${STAGE}/aot/overlays.json")"
+    static_output="${static_output%$'\r'}"
+  fi
   missing_refs=()
   while IFS= read -r rel; do
     [[ -z "${rel}" ]] && continue
@@ -547,6 +558,7 @@ if [[ -f "${STAGE}/CMakeLists.txt" ]]; then
     if [[ -n "${guarded}" ]] && grep -qxF -- "${rel}" <<<"${guarded}"; then
       continue
     fi
+    [[ -n "${static_output}" && "${rel}" == "${static_output}" ]] && continue
     [[ -e "${STAGE}/${rel}" ]] || missing_refs+=("${rel}")
   done < <(grep -oE '\$\{CMAKE_CURRENT_SOURCE_DIR\}/[^"]+' "${cml}" \
              | sed 's|^\${CMAKE_CURRENT_SOURCE_DIR}/||' | sort -u)
