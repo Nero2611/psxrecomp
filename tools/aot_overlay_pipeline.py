@@ -24,6 +24,7 @@ from packed_sector_table import extract_members as extract_sector_members
 from sector_extent_archive import extract_members as extract_extent_members
 from aligned_lzss_banks import banks as extract_lzss_banks
 from indexed_lzss_pack import members as extract_pack_members
+from opcode_nibble_lz import StreamError as NibbleLzError, decode_exact as decode_nibble_lz
 from mips_tagged_relocations import parse as parse_tagged_relocations, relocate as relocate_tagged_image
 from mod_package_images import ModPackageView
 
@@ -342,6 +343,31 @@ def pack_sources(disc, spec):
     return sources
 
 
+def nibble_lz_sources(disc, spec):
+    """Whole original files the loader decodes to a fixed address.
+
+    Each file must be one complete opcode-nibble LZ stream (see
+    opcode_nibble_lz.py) whose end marker is its final byte, and its decoded
+    image must match the declared SHA-256 before it becomes a producer."""
+    sources = []
+    require(len({item['file'].upper() for item in spec['files']}) == len(spec['files']),
+            'Duplicate compressed file')
+    for item in spec['files']:
+        file = item['file'].upper()
+        try:
+            body = decode_nibble_lz(disc.read(file))
+        except NibbleLzError as error:
+            raise ProfileError(f'{file}: {error}') from error
+        require(hashlib.sha256(body).hexdigest() == item['decoded_sha256'],
+                f'Decoded image changed: {file}')
+        base = number(item['load_addr'])
+        require(in_ram(base, len(body)) and base % 4 == 0, f'{file}: decoded image outside RAM')
+        sources.append(dict(name=file, base=base, body=body,
+                            spec={**spec, **item, 'allow_missing': True},
+                            source_file=file, source_offset=0, aliases=[]))
+    return sources
+
+
 def positioned_sources(disc, specifications, views=None, ram_bytes=RETAIL_RAM_BYTES):
     sources = []
     for spec in specifications:
@@ -414,6 +440,8 @@ def spec_sources(disc, spec):
         return sources
     if method == 'indexed_lzss_members':
         return pack_sources(disc, spec)
+    if method == 'opcode_nibble_lz_files':
+        return nibble_lz_sources(disc, spec)
     if method == 'sector_extent_members':
         members = extract_extent_members(disc.read(spec['file']),
             sector_size=number(spec.get('sector_size', 2048)),
@@ -587,7 +615,7 @@ def prepare(profile, disc, records, output, views=None):
             if (lo, hi) == (source['base'], source['base'] + len(source['body'])):
                 singles[source['name']] = record
     for source in sources:
-        if source['spec']['method'] in ('fixed_address_files', 'fixed_address_extents', 'packed_sector_members', 'sector_extent_members', 'aligned_lzss_banks', 'indexed_lzss_members', 'tagged_relocated_files') and source['name'] not in singles:
+        if source['spec']['method'] in ('fixed_address_files', 'fixed_address_extents', 'packed_sector_members', 'sector_extent_members', 'aligned_lzss_banks', 'indexed_lzss_members', 'opcode_nibble_lz_files', 'tagged_relocated_files') and source['name'] not in singles:
             record = make_fixed_record(source, disc)
             singles[source['name']] = record
             records.append(record)
