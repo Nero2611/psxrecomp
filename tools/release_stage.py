@@ -443,6 +443,12 @@ TOOLCHAIN_PINS = {
         'tcc_version': '0.9.27',
         'tcc_url': 'https://download.savannah.gnu.org/releases/tinycc/tcc-0.9.27-win64-bin.zip',
         'tcc_sha256': '34a721949a2583fdff725312da092fa0f5f1f284b702e6f811c6954714faabb2',
+        # GNU mirrors of the same file, tried in order when savannah is
+        # unreachable; the pinned SHA256 above still has to match.
+        'tcc_mirrors': (
+            'https://mirror.netcologne.de/savannah/tinycc/tcc-0.9.27-win64-bin.zip',
+            'https://mirror.csclub.uwaterloo.ca/nongnu/tinycc/tcc-0.9.27-win64-bin.zip',
+        ),
     },
     # Linux has no equivalent of python.org's embeddable zip, so the pinned
     # interpreter is a python-build-standalone release: a relocatable CPython
@@ -516,7 +522,16 @@ def get_pinned_archive(url, sha256, destination, retries=4, log=print):
     the download cache was first filled, forever. python.org and savannah both
     502 periodically, so transient failures retry with backoff rather than
     losing a whole release build.
+
+    `url` may also be a list of equivalent mirrors, tried in order. Every copy
+    is held to the same pinned SHA256, so a mirror can only supply the exact
+    pinned archive; a wrong copy just moves on to the next mirror. With more
+    than one mirror each gets two attempts, so an unreachable primary (savannah
+    has gone dark for hours) costs minutes, not the whole build.
     """
+    urls = [url] if isinstance(url, str) else list(url)
+    if len(urls) > 1:
+        retries = min(retries, 2)
     name = os.path.basename(destination)
     want = sha256.lower()
 
@@ -536,30 +551,41 @@ def get_pinned_archive(url, sha256, destination, retries=4, log=print):
         os.remove(destination)
 
     tmp = destination + '.tmp'
-    for attempt in range(1, retries + 1):
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-            with urllib.request.urlopen(url, timeout=120) as r, open(tmp, 'wb') as f:
-                shutil.copyfileobj(r, f)
-            got = digest(tmp)
-            if got != want:
-                os.remove(tmp)
-                raise StageError('SHA256 mismatch for %s: got %s, expected %s'
-                                 % (name, got, want))
-            os.replace(tmp, destination)
-            return destination
-        except StageError:
-            raise
-        except Exception as e:                                  # noqa: BLE001
-            if attempt == retries:
-                _die('failed to fetch %s after %d attempts: %s. Place a '
-                     'verified copy at %s and re-run.'
-                     % (name, retries, e, destination))
-            delay = min(30, 2 ** attempt)
-            log('release_stage: %s fetch attempt %d failed (%s); retrying in %ds'
-                % (name, attempt, e, delay))
-            time.sleep(delay)
+    for index, source in enumerate(urls):
+        last_source = index == len(urls) - 1
+        for attempt in range(1, retries + 1):
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                with urllib.request.urlopen(source, timeout=120) as r, \
+                        open(tmp, 'wb') as f:
+                    shutil.copyfileobj(r, f)
+                got = digest(tmp)
+                if got != want:
+                    os.remove(tmp)
+                    raise StageError('SHA256 mismatch for %s from %s: got %s, '
+                                     'expected %s' % (name, source, got, want))
+                os.replace(tmp, destination)
+                return destination
+            except StageError as e:
+                if last_source:
+                    raise
+                log('release_stage: %s; trying the next mirror' % e)
+                break
+            except Exception as e:                              # noqa: BLE001
+                if attempt == retries:
+                    if last_source:
+                        _die('failed to fetch %s after %d attempts from %d '
+                             'source(s): %s. Place a verified copy at %s and '
+                             're-run.' % (name, retries, len(urls), e,
+                                          destination))
+                    log('release_stage: %s unreachable at %s (%s); trying '
+                        'the next mirror' % (name, source, e))
+                    break
+                delay = min(30, 2 ** attempt)
+                log('release_stage: %s fetch attempt %d failed (%s); '
+                    'retrying in %ds' % (name, attempt, e, delay))
+                time.sleep(delay)
 
 
 def _extract_zip(archive, dest):
@@ -655,8 +681,11 @@ def stage_toolchain(stage, recomp_dir, recomp_tools, recomp_include, dl_cache,
         _extract_tar_top_level(py_archive, toolchain, 'python')
 
     if pins['tcc_url']:
+        tcc_sources = pins['tcc_url']
+        if pins.get('tcc_mirrors'):
+            tcc_sources = [pins['tcc_url'], *pins['tcc_mirrors']]
         tcc_archive = get_pinned_archive(
-            pins['tcc_url'], pins['tcc_sha256'],
+            tcc_sources, pins['tcc_sha256'],
             os.path.join(dl_cache, _url_basename(pins['tcc_url'])), log=log)
         tcc_tmp = os.path.join(dl_cache, 'tcc_extract')
         if os.path.isdir(tcc_tmp):
