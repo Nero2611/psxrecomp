@@ -101,6 +101,7 @@ extern "C" int fntrace_is_game_started(void) { return 1; }
 extern "C" void gpu_ws_tag_hud_primitive(uint32_t, int) {}
 extern "C" void gpu_ws_tag_world_primitive(uint32_t, int) {}
 extern "C" void gpu_ws_set_adaptive_backdrop_preload(int) {}
+extern "C" void gpu_set_display_layout_pal(int) {}
 
 static void test_vblank_plugin(void) {
     plugin_calls++;

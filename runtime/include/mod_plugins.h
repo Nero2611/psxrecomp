@@ -140,6 +140,10 @@ void psx_mod_tag_world_primitive(uint32_t primitive, int is_world);
 /* Enable aspect-derived column selection for a title that opted into the
  * auto_backdrop detector. No effect on titles that did not opt in. */
 void psx_mod_set_adaptive_backdrop_preload(int enabled);
+/* Clip the displayed picture to the PAL (1) or NTSC (0) active region
+ * whatever the video timing, or follow GP1(08h) like hardware (-1). Lets a
+ * PAL game switched to 60 Hz keep all of its 256 lines on screen. */
+void psx_mod_set_display_layout_pal(int pal);
 
 /*
  * Width, in native game pixels, of the picture the guest is currently

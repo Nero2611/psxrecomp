@@ -363,6 +363,9 @@ void gpu_ws_set_nw_hud_corners(int on);
 void gpu_ws_tag_hud_primitive(uint32_t primitive, int edge);
 void gpu_ws_tag_world_primitive(uint32_t primitive, int is_world);
 void gpu_ws_set_adaptive_backdrop_preload(int enabled);
+/* Active region the display range is clipped to: -1 follows GP1(08h),
+ * 0 = NTSC, 1 = PAL regardless of the video timing. */
+void gpu_set_display_layout_pal(int pal);
 /* Explicit native-wide HUD packet anchor from a trusted title plugin.
  * `prim` is the address of the PsyQ P_TAG word; the drawn command starts at
  * prim+4. anchor: -1 = left, 0 = center, +1 = right. */

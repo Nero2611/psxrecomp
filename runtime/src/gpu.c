@@ -3244,6 +3244,15 @@ void gpu_init(void) {
     (void)psx_video_timing_set_pal((int)video_mode);
 }
 
+/* Enhancement override of the active region the display range is clipped
+ * to: -1 follows GP1(08h) like hardware; 0/1 keeps the NTSC/PAL region
+ * whatever the timing, so a PAL game run at 60 Hz shows all of its lines. */
+static int s_display_layout_pal = -1;
+
+void gpu_set_display_layout_pal(int pal) {
+    s_display_layout_pal = pal < 0 ? -1 : (pal ? 1 : 0);
+}
+
 void gpu_set_power_on_video_mode(int pal) {
     s_power_on_video_mode = pal ? 1u : 0u;
     video_mode = s_power_on_video_mode;
@@ -3768,7 +3777,8 @@ void gpu_get_display_info(GpuDisplayInfo* out) {
      * active end (common overscan programming) includes a flickering junk
      * line at the bottom of present that DuckStation crops away. */
     PsxDisplayVerticalLayout vertical = psx_display_vertical_layout(
-        video_mode != 0, v_display_y1, v_display_y2);
+        s_display_layout_pal >= 0 ? s_display_layout_pal : video_mode != 0,
+        v_display_y1, v_display_y2);
     uint32_t h = psx_display_source_height(vertical, 240u);
     uint32_t screen_h = vertical.range_set ? vertical.canvas_height : h;
     uint32_t screen_origin_y = vertical.valid ? vertical.canvas_origin_y : 0u;
