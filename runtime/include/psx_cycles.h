@@ -77,6 +77,17 @@ extern uint32_t *g_psx_cyc_local_acc;
 extern uint32_t g_psx_cpu_oc_q16;
 extern uint32_t g_psx_cpu_oc_frac;
 
+/* The overclock engages at game handoff, like the CD speed divisor: BIOS boot
+ * code times CD-ROM handshakes with fixed busy-wait loop counts (OpenBIOS
+ * waits 30000 polls for the Init acknowledge), which a faster CPU exhausts
+ * before the stock-timed drive answers -- above ~325% boot never finished.
+ * set_game_ratio stores the game's ratio (applied at once when the game
+ * already runs); notify_game_started applies it; notify_boot returns to
+ * stock for a new boot. */
+void psx_cpu_oc_set_game_ratio(uint32_t q16, int game_started);
+void psx_cpu_oc_notify_game_started(void);
+void psx_cpu_oc_notify_boot(void);
+
 static inline uint32_t psx_cpu_oc_scale(uint64_t cpu_cycles) {
     uint64_t v = cpu_cycles * (uint64_t)g_psx_cpu_oc_q16 + g_psx_cpu_oc_frac;
     g_psx_cpu_oc_frac = (uint32_t)(v & 0xFFFFu);

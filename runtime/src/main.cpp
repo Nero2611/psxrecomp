@@ -1438,15 +1438,16 @@ extern "C" int psx_mod_set_cpu_overclock(uint32_t percent) {
             (unsigned)percent);
         return 0;
     }
-    /* Activation runs before the game boots, so no guest time has been
-     * charged at the old ratio yet. */
-    g_psx_cpu_oc_q16 = percent == 100
-        ? 0u
-        : (uint32_t)((65536u * 100u + percent / 2u) / percent);
-    g_psx_cpu_oc_frac = 0;
+    /* Activation runs before the game boots; the BIOS boots at stock speed
+     * and the ratio engages at game handoff (psx_cycles.h). */
+    psx_cpu_oc_set_game_ratio(
+        percent == 100
+            ? 0u
+            : (uint32_t)((65536u * 100u + percent / 2u) / percent),
+        fntrace_is_game_started());
     std::fprintf(stdout,
-        "psxrecomp: mod selected CPU overclock %u%% (%.4f MHz); devices, "
-        "timers and VBlank keep stock timing\n",
+        "psxrecomp: mod selected CPU overclock %u%% (%.4f MHz) from game "
+        "start; BIOS boot, devices, timers and VBlank keep stock timing\n",
         (unsigned)percent, 33.8688 * (double)percent / 100.0);
     return 1;
 }

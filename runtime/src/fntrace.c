@@ -5,6 +5,7 @@
 #include "text_xlate.h"     /* on-the-fly string translation hook (framework) */
 #include "parity_trace.h"   /* general control-flow parity ring (native producer) */
 #include "mod_runtime.h"
+#include "psx_cycles.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -43,6 +44,7 @@ void fntrace_set_game_range(uint32_t lo, uint32_t hi) {
     (void)hi;
     s_game_entry_phys = lo & 0x1FFFFFFFu;
     s_game_started = 0;
+    psx_cpu_oc_notify_boot();
 }
 
 int fntrace_is_game_started(void) { return s_game_started; }
@@ -59,6 +61,7 @@ void fntrace_mark_game_started(CPUState* cpu) {
     dirty_ram_clear_image_baseline();
     memory_clear_low_boot_scratch();
     cdrom_notify_game_started();
+    psx_cpu_oc_notify_game_started();
     boot_state_trigger_capture(cpu);
 }
 

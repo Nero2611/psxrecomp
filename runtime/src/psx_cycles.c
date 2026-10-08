@@ -26,6 +26,23 @@ uint32_t g_psx_cyc_batch_limit = 0;
 /* CPU overclock ratio (Q16, 0 = off) and its sub-cycle remainder; see psx_cycles.h. */
 uint32_t g_psx_cpu_oc_q16 = 0;
 uint32_t g_psx_cpu_oc_frac = 0;
+/* Ratio the game runs at; the BIOS boots at stock (see psx_cycles.h). */
+static uint32_t s_psx_cpu_oc_game_q16 = 0;
+
+void psx_cpu_oc_set_game_ratio(uint32_t q16, int game_started) {
+    s_psx_cpu_oc_game_q16 = q16;
+    if (game_started) psx_cpu_oc_notify_game_started();
+}
+
+void psx_cpu_oc_notify_game_started(void) {
+    g_psx_cpu_oc_q16 = s_psx_cpu_oc_game_q16;
+    g_psx_cpu_oc_frac = 0;
+}
+
+void psx_cpu_oc_notify_boot(void) {
+    g_psx_cpu_oc_q16 = 0;
+    g_psx_cpu_oc_frac = 0;
+}
 int      g_psx_cyc_bb_defer = 0;
 uint32_t *g_psx_cyc_local_acc = NULL;
 static int      s_cycle_replay_active = 0;
@@ -175,6 +192,16 @@ static uint32_t devices_cycles_to_next_idle_event(void) {
 /* Test/diagnostic accessor for the idle-skip observation boundary above. */
 uint32_t psx_idle_cycles_to_next_observable_event(void) {
     return devices_cycles_to_next_idle_event();
+}
+
+/* Let device time run to that boundary (at most max_cycles), replaying every
+ * device event on the way; used where a guest poll loop is known to wait for
+ * it (psx_mod_function_wait). Returns the cycles advanced. */
+uint32_t psx_advance_to_next_observable_event(uint32_t max_cycles) {
+    uint32_t cycles = devices_cycles_to_next_idle_event();
+    if (cycles > max_cycles) cycles = max_cycles;
+    psx_advance_device_cycles(cycles);
+    return cycles;
 }
 
 static void psx_devices_recompute_deadline(void) {

@@ -39,6 +39,15 @@ int psx_mod_function_can_return(void);
  * the guest call as `jr $ra` would, after the callback has applied the
  * function's effects (memory, $v0). The generated body does not run. */
 void psx_mod_function_return(struct CPUState* cpu);
+/* Inside a function-entry callback that may take over, for a guest function
+ * that polls until something happens: advance device time to the next event
+ * the guest could observe (at most max_cycles), deliver the interrupts it
+ * raised, and enter the function again so it re-checks its condition. The
+ * generated body does not run. Returns the cycles advanced, 0 when nothing
+ * was done (the body then runs as usual). */
+uint32_t psx_mod_function_wait(struct CPUState* cpu, uint32_t max_cycles);
+/* Guest device-timeline cycle counter. */
+uint64_t psx_mod_guest_cycles(void);
 /* Active function-entry hook count (0 = none). Hot callers test it before the
  * call, so a run without an active hook pays one load per interpreted entry. */
 extern uint32_t g_psx_mod_function_entry_hooks;

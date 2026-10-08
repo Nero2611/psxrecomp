@@ -46,6 +46,8 @@ extern "C" void psx_write_half(uint32_t addr, uint16_t value);
 extern "C" uint32_t psx_read_word(uint32_t addr);
 extern "C" void psx_write_word(uint32_t addr, uint32_t value);
 extern "C" uint8_t* memory_get_ram_ptr(void);
+extern "C" uint32_t psx_advance_to_next_observable_event(uint32_t max_cycles);
+extern "C" uint64_t psx_get_cycle_count(void);
 extern "C" uint32_t psx_mod_memory_alloc(uint32_t size, uint32_t alignment);
 extern "C" uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t size,
                                                   uint32_t alignment);
@@ -1633,6 +1635,7 @@ namespace {
  * its body); psx_mod_function_return records the takeover here. */
 int g_function_entry_can_return = 0;
 int g_function_entry_returned = 0;
+uint32_t g_function_entry_address = 0;
 }  // namespace
 
 extern "C" int psx_mod_function_can_return(void) {
@@ -1651,13 +1654,35 @@ extern "C" int psx_mod_function_entry_replace(CPUState* cpu, uint32_t address) {
     if (!g_psx_mod_function_entry_hooks || !cpu) return 0;
     const int outer_can_return = g_function_entry_can_return;
     const int outer_returned = g_function_entry_returned;
+    const uint32_t outer_address = g_function_entry_address;
     g_function_entry_can_return = 1;
     g_function_entry_returned = 0;
+    g_function_entry_address = address;
     psx_mod_function_entry(cpu, address);
     const int returned = g_function_entry_returned;
     g_function_entry_can_return = outer_can_return;
     g_function_entry_returned = outer_returned;
+    g_function_entry_address = outer_address;
     return returned;
+}
+
+extern "C" uint32_t psx_mod_function_wait(CPUState* cpu, uint32_t max_cycles) {
+    if (!cpu || !max_cycles || !psx_mod_function_can_return() ||
+        psx_get_in_exception())
+        return 0;
+    /* What the guest's poll loop would do, minus the polling: let device time
+     * run to the next event the guest could observe, deliver what it raised,
+     * and enter the function again so it re-checks its condition. */
+    const uint32_t cycles = psx_advance_to_next_observable_event(max_cycles);
+    const uint32_t entry = g_function_entry_address;
+    psx_check_interrupts_at(cpu, entry);
+    cpu->pc = entry;
+    g_function_entry_returned = 1;
+    return cycles;
+}
+
+extern "C" uint64_t psx_mod_guest_cycles(void) {
+    return psx_get_cycle_count();
 }
 
 extern "C" void psx_mod_function_entry(CPUState* cpu, uint32_t address) {

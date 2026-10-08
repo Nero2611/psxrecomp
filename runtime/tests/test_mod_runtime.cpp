@@ -84,6 +84,14 @@ extern "C" void overlay_capture_before_dma(uint32_t, uint32_t) {}
 extern "C" void overlay_capture_on_dma(uint32_t, uint32_t, const uint8_t*) {}
 static int interrupt_checks;
 static uint32_t interrupt_check_pc;
+static uint32_t advanced_cycles;
+extern "C" uint32_t psx_advance_to_next_observable_event(uint32_t max_cycles) {
+    const uint32_t cycles = max_cycles < 1000u ? max_cycles : 1000u;
+    advanced_cycles += cycles;
+    return cycles;
+}
+extern "C" uint64_t psx_get_cycle_count(void) { return advanced_cycles; }
+extern "C" int psx_get_in_exception(void) { return 0; }
 extern "C" void psx_check_interrupts_at(CPUState*, uint32_t resume_pc) {
     interrupt_checks++;
     interrupt_check_pc = resume_pc;
@@ -121,6 +129,11 @@ static void test_takeover_entry(CPUState* cpu, uint32_t) {
     psx_mod_write_guest_bytes(0x80001001u, bytes, sizeof bytes);
     cpu->gpr[2] = 0x1234u;
     psx_mod_function_return(cpu);
+}
+/* A poll hook: waits for the next device event and re-enters the function. */
+static uint32_t wait_result;
+static void test_wait_entry(CPUState* cpu, uint32_t) {
+    wait_result = psx_mod_function_wait(cpu, 5000u);
 }
 static void test_unselected_entry(CPUState*, uint32_t) { unselected_entry_hits++; }
 
@@ -372,6 +385,9 @@ int main() {
               "runtime.test-vblank", 0x80003100u, test_takeover_entry) == 1,
           "active plugin's takeover hook must register");
     check(psx_mod_register_function_entry_plugin(
+              "runtime.test-vblank", 0x80003200u, test_wait_entry) == 1,
+          "active plugin's wait hook must register");
+    check(psx_mod_register_function_entry_plugin(
               "runtime.test-disabled-entry", 0x80003000u, test_disabled_entry) == 1,
           "disabled feature's function-entry hook must register");
     check(psx_mod_register_function_entry_plugin(
@@ -404,13 +420,21 @@ int main() {
     check(psx_mod_function_can_return() == 0,
           "takeover permission must not outlive the generated entry");
     entry_cpu.pc = 0u;
+    psx_mod_function_entry(&entry_cpu, 0x80003200u);
+    check(wait_result == 0 && entry_cpu.pc == 0u && psx_mod_guest_cycles() == 0u,
+          "an interpreted entry must never wait");
+    check(psx_mod_function_entry_replace(&entry_cpu, 0x80003200u) == 1 &&
+              wait_result == 1000u && psx_mod_guest_cycles() == 1000u &&
+              entry_cpu.pc == 0x80003200u && interrupt_check_pc == 0x80003200u,
+          "a waiting hook must advance to the next event and re-enter the function");
+    entry_cpu.pc = 0u;
     check(psx_mod_function_entry_replace(&entry_cpu, 0x80003000u) == 0,
           "an observing hook must leave the generated body to run");
     active_entry_hits = 0;
     mod_runtime_on_vblank();
     check(plugin_calls == 1,
           "resolved trusted plugin must run on guest VBlank");
-    check(g_psx_mod_function_entry_hooks == 2,
+    check(g_psx_mod_function_entry_hooks == 3,
           "activation must flatten exactly the active plan's entry hooks");
     psx_mod_function_entry(&entry_cpu, 0x80003000u);
     check(active_entry_hits == 1 && active_entry_last == 0x80003000u,
