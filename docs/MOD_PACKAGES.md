@@ -505,7 +505,12 @@ id. A function-entry hook (`psx_mod_register_function_entry_plugin`) runs at the
 top of a generated function the game config lists in
 `[recompiler] mod_function_entry_funcs`, and at every interpreted entry to the
 same address (segment bits ignored), so the backend running the page does not
-matter. Like the other kinds it satisfies a manifest `[[plugin]]` and runs only
+matter. At a generated entry a hook may also take over the whole call: when
+`psx_mod_function_can_return()` reports 1, the hook applies the function's
+effects and calls `psx_mod_function_return(cpu)`, which completes the call as
+`jr $ra` would and skips the generated body. Interpreted entries cannot be
+taken over, so such a hook must leave the call to the guest code there. Like
+the other kinds it satisfies a manifest `[[plugin]]` and runs only
 while the resolved plan activates its id: the active hooks are flattened into an
 address table at plugin activation, and a plan change drops them until the next
 activation. Activation runs after the

@@ -184,8 +184,9 @@ public:
     std::vector<ISOFileEntry> ListFiles(const std::string& path = "");
 
     /**
-     * Find a file by name in the root directory
-     * @param path Filename to search for (e.g., "SYSTEM.CNF" or "SCUS_942.36")
+     * Find a file by path, walking nested directories from the root
+     * @param path File path (e.g., "SYSTEM.CNF" or "BRIEF\\GERMAN\\LEVEL1.BIN");
+     *             either separator, optional leading separator and ";1" suffix
      * @param entry Output ISOFileEntry to populate with file info
      * @return true if found, false if not found
      */

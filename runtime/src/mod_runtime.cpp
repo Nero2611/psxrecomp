@@ -4,7 +4,11 @@
 #include "iso_reader.h"
 #include "mod_packages.h"
 #include "mod_plugins.h"
+#include "cpu_state.h"
 #include "gpu.h"
+#include "dirty_ram_interp.h"
+#include "interrupts.h"
+#include "overlay_capture.h"
 #include "psx_memory.h"
 #include "psx_sha256.h"
 
@@ -41,6 +45,7 @@ extern "C" uint16_t psx_read_half(uint32_t addr);
 extern "C" void psx_write_half(uint32_t addr, uint16_t value);
 extern "C" uint32_t psx_read_word(uint32_t addr);
 extern "C" void psx_write_word(uint32_t addr, uint32_t value);
+extern "C" uint8_t* memory_get_ram_ptr(void);
 extern "C" uint32_t psx_mod_memory_alloc(uint32_t size, uint32_t alignment);
 extern "C" uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t size,
                                                   uint32_t alignment);
@@ -1407,6 +1412,41 @@ extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
     } catch (...) { return 0; }
 }
 
+extern "C" int psx_mod_find_disc_file(const char* path, uint32_t* lba,
+                                      uint32_t* size) {
+    using namespace PSXRecompV4;
+    if (lba) *lba = 0;
+    if (size) *size = 0;
+    if (!path || !*path || !lba || !size) return 0;
+    try {
+        const auto& s = state();
+        const auto& mount = s.effective_disc_path.empty() ? s.disc_path : s.effective_disc_path;
+        if (mount.empty()) return 0;
+        PS1::ISOReader reader;
+        PS1::ISOFileEntry entry;
+        if (!reader.Open(mount.string()) || !reader.FindFile(path, entry) ||
+            entry.is_directory)
+            return 0;
+        *lba = entry.lba;
+        *size = entry.size;
+        return 1;
+    } catch (...) { return 0; }
+}
+
+extern "C" const char* psx_mod_exe_dir(void) {
+    using namespace PSXRecompV4;
+    static std::string dir;
+    if (dir.empty()) {
+        /* The mod manager root is <exe-dir>/mods. */
+        const std::filesystem::path root = state().manager.root();
+        if (root.empty()) return "";
+        dir = root.parent_path().string();
+        if (!dir.empty() && dir.back() != '/' && dir.back() != '\\')
+            dir += (char)std::filesystem::path::preferred_separator;
+    }
+    return dir.c_str();
+}
+
 extern "C" void mod_runtime_activate_plugins(void) {
     using namespace PSXRecompV4;
     RuntimeMods& s = state();
@@ -1509,6 +1549,31 @@ extern "C" void psx_mod_write_code_word(uint32_t address, uint32_t value) {
     dirty_ram_mark_executable_range(address & 0x1FFFFFFFu, 4u);
 }
 
+extern "C" int psx_mod_write_guest_bytes(uint32_t address, const void* data,
+                                         uint32_t size) {
+    uint32_t offset = 0;
+    if (!data || !psx_ram_resolve(address, size, &offset)) return 0;
+    /* Same RAM-side contract as a to-RAM CD DMA (dma.c): journal executed
+     * code about to be overwritten, store, then mark the span as written
+     * code so stale native/interpreted variants are not reused. */
+    overlay_capture_before_dma(offset, size);
+    const uint8_t* bytes = static_cast<const uint8_t*>(data);
+    uint32_t i = 0;
+    for (; i < size && ((offset + i) & 3u); i++)
+        psx_write_byte(0x80000000u | (offset + i), bytes[i]);
+    for (; i + 4u <= size; i += 4u) {
+        uint32_t word;
+        std::memcpy(&word, bytes + i, 4);
+        psx_write_word(0x80000000u | (offset + i), word);
+    }
+    for (; i < size; i++)
+        psx_write_byte(0x80000000u | (offset + i), bytes[i]);
+    dirty_ram_mark_executable_range(offset, size);
+    if (offset < 0x1C0000u || offset >= PSX_MAIN_RAM_RETAIL_BYTES)
+        overlay_capture_on_dma(offset, size, memory_get_ram_ptr() + offset);
+    return 1;
+}
+
 extern "C" uint32_t psx_mod_alloc_guest_memory(uint32_t size,
                                                 uint32_t alignment) {
     return psx_mod_memory_alloc(size, alignment);
@@ -1563,6 +1628,38 @@ extern "C" int psx_mod_register_function_entry_plugin(
     return mod_register_function_entry_plugin(id, address, callback) ? 1 : 0;
 }
 
+namespace {
+/* Set while hooks run from a generated entry (the only kind that can skip
+ * its body); psx_mod_function_return records the takeover here. */
+int g_function_entry_can_return = 0;
+int g_function_entry_returned = 0;
+}  // namespace
+
+extern "C" int psx_mod_function_can_return(void) {
+    return g_function_entry_can_return && !g_function_entry_returned;
+}
+
+extern "C" void psx_mod_function_return(CPUState* cpu) {
+    if (!cpu || !psx_mod_function_can_return()) return;
+    const uint32_t ra = cpu->gpr[31];
+    psx_check_interrupts_at(cpu, ra);
+    cpu->pc = ra;
+    g_function_entry_returned = 1;
+}
+
+extern "C" int psx_mod_function_entry_replace(CPUState* cpu, uint32_t address) {
+    if (!g_psx_mod_function_entry_hooks || !cpu) return 0;
+    const int outer_can_return = g_function_entry_can_return;
+    const int outer_returned = g_function_entry_returned;
+    g_function_entry_can_return = 1;
+    g_function_entry_returned = 0;
+    psx_mod_function_entry(cpu, address);
+    const int returned = g_function_entry_returned;
+    g_function_entry_can_return = outer_can_return;
+    g_function_entry_returned = outer_returned;
+    return returned;
+}
+
 extern "C" void psx_mod_function_entry(CPUState* cpu, uint32_t address) {
     using namespace PSXRecompV4;
     if (!g_psx_mod_function_entry_hooks || !cpu) return;
@@ -1572,7 +1669,7 @@ extern "C" void psx_mod_function_entry(CPUState* cpu, uint32_t address) {
     auto it = std::lower_bound(
         table.begin(), table.end(), key,
         [](const ActiveFunctionEntryHook& hook, uint32_t k) { return hook.key < k; });
-    for (; it != table.end() && it->key == key; ++it) {
+    for (; it != table.end() && it->key == key && !g_function_entry_returned; ++it) {
         const ModResolution::Plugin* previous = s.current_plugin;
         s.current_plugin = it->plugin;
         it->callback(cpu, address);

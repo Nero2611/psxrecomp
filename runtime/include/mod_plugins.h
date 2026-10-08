@@ -28,6 +28,17 @@ int psx_mod_register_function_entry_plugin(
  * Hooks match by code address (segment bits ignored) and run only for plugins
  * the active plan resolved; the table is rebuilt at plugin activation. */
 void psx_mod_function_entry(struct CPUState* cpu, uint32_t address);
+/* Generated-code variant: runs the same hooks and returns 1 when one of them
+ * took over the call with psx_mod_function_return, so the generated body is
+ * skipped. Only generated function entries can honour that; interpreted
+ * entries use psx_mod_function_entry. */
+int psx_mod_function_entry_replace(struct CPUState* cpu, uint32_t address);
+/* Inside a function-entry callback: 1 when the entry can be taken over. */
+int psx_mod_function_can_return(void);
+/* Inside a function-entry callback that may take over (see above): complete
+ * the guest call as `jr $ra` would, after the callback has applied the
+ * function's effects (memory, $v0). The generated body does not run. */
+void psx_mod_function_return(struct CPUState* cpu);
 /* Active function-entry hook count (0 = none). Hot callers test it before the
  * call, so a run without an active hook pays one load per interpreted entry. */
 extern uint32_t g_psx_mod_function_entry_hooks;
@@ -39,6 +50,11 @@ int psx_mod_game_started(void);
  * otherwise capacity must hold the entire file. Active sector mods apply. */
 int psx_mod_read_disc_file(const char* path, void* buffer, uint32_t capacity,
                            uint32_t* size);
+/* Locate an original mounted-disc file: first sector (disc-relative LBA,
+ * 0 = 00:02:00) and byte size. Nested paths, either separator. */
+int psx_mod_find_disc_file(const char* path, uint32_t* lba, uint32_t* size);
+/* Directory next to the executable, with a trailing separator. */
+const char* psx_mod_exe_dir(void);
 /* Experimental retained-texture service (currently OpenGL only). IDs are
  * nonzero, stable game-owned identities, NOT GL names. Banks are immutable
  * 16-bit PS1 texels/indices with a caller-selected row pitch (width).
@@ -75,6 +91,10 @@ void psx_mod_write_word(uint32_t address, uint32_t value);
  * restored save state cannot leave the compiled instruction stale.
  */
 void psx_mod_write_code_word(uint32_t address, uint32_t value);
+/* Store a block into main RAM with the RAM-side effects of a to-RAM CD DMA
+ * (written code is invalidated). Returns 0 when the span is not in RAM. */
+int psx_mod_write_guest_bytes(uint32_t address, const void* data,
+                              uint32_t size);
 
 /*
  * Allocate opt-in enhancement memory from Expansion 1. Until the first

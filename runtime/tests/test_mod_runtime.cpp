@@ -75,6 +75,19 @@ extern "C" void gpu_get_display_info(GpuDisplayInfo* out) {
 }
 
 extern "C" void dirty_ram_mark_executable_range(uint32_t, uint32_t) {}
+extern "C" uint32_t g_psx_ram_size;
+uint32_t g_psx_ram_size = 2u * 1024u * 1024u;
+extern "C" uint32_t g_psx_ram_mask;
+uint32_t g_psx_ram_mask = 2u * 1024u * 1024u - 1u;
+extern "C" uint8_t* memory_get_ram_ptr(void) { return ram.data(); }
+extern "C" void overlay_capture_before_dma(uint32_t, uint32_t) {}
+extern "C" void overlay_capture_on_dma(uint32_t, uint32_t, const uint8_t*) {}
+static int interrupt_checks;
+static uint32_t interrupt_check_pc;
+extern "C" void psx_check_interrupts_at(CPUState*, uint32_t resume_pc) {
+    interrupt_checks++;
+    interrupt_check_pc = resume_pc;
+}
 extern "C" int fntrace_is_game_started(void) { return 1; }
 /* Widescreen tag passthroughs mod_runtime forwards to the GPU; unused here. */
 extern "C" void gpu_ws_tag_hud_primitive(uint32_t, int) {}
@@ -96,6 +109,19 @@ static void test_active_entry(CPUState*, uint32_t address) {
     active_entry_last = address;
 }
 static void test_disabled_entry(CPUState*, uint32_t) { disabled_entry_hits++; }
+/* A hook that takes the call over wherever it may, as a file-loading HLE
+ * does: it applies the effect, sets $v0 and returns to $ra. */
+static int takeover_hits;
+static int takeover_could_return;
+static void test_takeover_entry(CPUState* cpu, uint32_t) {
+    takeover_hits++;
+    takeover_could_return = psx_mod_function_can_return();
+    if (!takeover_could_return) return;
+    static const uint8_t bytes[] = {1, 2, 3, 4, 5, 6, 7};
+    psx_mod_write_guest_bytes(0x80001001u, bytes, sizeof bytes);
+    cpu->gpr[2] = 0x1234u;
+    psx_mod_function_return(cpu);
+}
 static void test_unselected_entry(CPUState*, uint32_t) { unselected_entry_hits++; }
 
 static void test_activation_plugin(void) {
@@ -343,6 +369,9 @@ int main() {
               "runtime.test-vblank", 0x80003000u, test_active_entry) == 1,
           "active plugin's function-entry hook must register");
     check(psx_mod_register_function_entry_plugin(
+              "runtime.test-vblank", 0x80003100u, test_takeover_entry) == 1,
+          "active plugin's takeover hook must register");
+    check(psx_mod_register_function_entry_plugin(
               "runtime.test-disabled-entry", 0x80003000u, test_disabled_entry) == 1,
           "disabled feature's function-entry hook must register");
     check(psx_mod_register_function_entry_plugin(
@@ -361,10 +390,27 @@ int main() {
     mod_runtime_activate_plugins();
     check(activation_calls == 1,
           "resolved trusted plugin must activate before runtime startup");
+    entry_cpu.gpr[31] = 0x80004444u;
+    psx_mod_function_entry(&entry_cpu, 0x80003100u);
+    check(takeover_hits == 1 && !takeover_could_return && entry_cpu.pc == 0u,
+          "an interpreted entry must never be taken over");
+    check(psx_mod_function_entry_replace(&entry_cpu, 0x80003100u) == 1 &&
+              takeover_could_return && entry_cpu.gpr[2] == 0x1234u &&
+              entry_cpu.pc == 0x80004444u && interrupt_checks == 1 &&
+              interrupt_check_pc == 0x80004444u,
+          "a generated entry's hook must be able to complete the call to $ra");
+    check(ram[0x1000] == 0 && ram[0x1001] == 1 && ram[0x1007] == 7 && ram[0x1008] == 0,
+          "guest block writes must store exactly the given unaligned span");
+    check(psx_mod_function_can_return() == 0,
+          "takeover permission must not outlive the generated entry");
+    entry_cpu.pc = 0u;
+    check(psx_mod_function_entry_replace(&entry_cpu, 0x80003000u) == 0,
+          "an observing hook must leave the generated body to run");
+    active_entry_hits = 0;
     mod_runtime_on_vblank();
     check(plugin_calls == 1,
           "resolved trusted plugin must run on guest VBlank");
-    check(g_psx_mod_function_entry_hooks == 1,
+    check(g_psx_mod_function_entry_hooks == 2,
           "activation must flatten exactly the active plan's entry hooks");
     psx_mod_function_entry(&entry_cpu, 0x80003000u);
     check(active_entry_hits == 1 && active_entry_last == 0x80003000u,

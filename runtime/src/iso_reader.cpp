@@ -855,61 +855,51 @@ std::vector<ISOFileEntry> ISOReader::ListFiles(const std::string& path) {
 }
 
 bool ISOReader::FindFile(const std::string& path, ISOFileEntry& entry) {
-    // Check if file is open
     if (!is_open_) {
         return false;
     }
 
-    // Check if path contains a directory separator
-    size_t sep = path.find('/');
-    if (sep == std::string::npos) {
-        sep = path.find('\\');
+    // Walk "DIR/SUB/FILE" (either separator, optional leading separator and
+    // ";1" version suffix) one directory level at a time from the root, so
+    // nested paths such as "BRIEF/GERMAN/LEVEL1.BIN" resolve too.
+    auto upper = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return (char)std::toupper(c); });
+        return s;
+    };
+    std::vector<std::string> parts;
+    std::string part;
+    for (char c : path) {
+        if (c == '/' || c == '\\') {
+            if (!part.empty()) parts.push_back(upper(part));
+            part.clear();
+        } else {
+            part += c;
+        }
     }
+    if (!part.empty()) parts.push_back(upper(part));
+    if (parts.empty()) return false;
+    const size_t version = parts.back().find(';');
+    if (version != std::string::npos) parts.back().resize(version);
 
-    if (sep != std::string::npos) {
-        // Subdirectory path: "DIR/FILE" or "DIR\FILE"
-        std::string dir_name  = path.substr(0, sep);
-        std::string file_name = path.substr(sep + 1);
-
-        // List the subdirectory
-        std::vector<ISOFileEntry> sub_files = ListFiles(dir_name);
-
-        std::string file_upper = file_name;
-        std::transform(file_upper.begin(), file_upper.end(), file_upper.begin(),
-                       [](unsigned char c) { return std::toupper(c); });
-
-        for (const auto& f : sub_files) {
-            std::string name_upper = f.name;
-            std::transform(name_upper.begin(), name_upper.end(), name_upper.begin(),
-                           [](unsigned char c) { return std::toupper(c); });
-            if (name_upper == file_upper) {
-                entry = f;
-                return true;
+    RootDirectoryInfo root = GetRootDirectory();
+    std::vector<ISOFileEntry> dir = ListFilesByLBA(root.lba, root.size);
+    for (size_t i = 0; i < parts.size(); i++) {
+        const bool last = i + 1 == parts.size();
+        const ISOFileEntry* match = nullptr;
+        for (const auto& e : dir) {
+            if (upper(e.name) == parts[i] && (last || e.is_directory)) {
+                match = &e;
+                break;
             }
         }
-        return false;
-    }
-
-    // Root-level file: search root directory
-    std::vector<ISOFileEntry> files = ListFiles("");
-
-    // Search for matching filename (case-insensitive comparison)
-    for (const auto& file : files) {
-        std::string file_upper = file.name;
-        std::string path_upper = path;
-
-        std::transform(file_upper.begin(), file_upper.end(), file_upper.begin(),
-                       [](unsigned char c) { return std::toupper(c); });
-        std::transform(path_upper.begin(), path_upper.end(), path_upper.begin(),
-                       [](unsigned char c) { return std::toupper(c); });
-
-        if (file_upper == path_upper) {
-            entry = file;
+        if (!match) return false;
+        if (last) {
+            entry = *match;
             return true;
         }
+        dir = ListFilesByLBA(match->lba, match->size > 0 ? match->size : 2048);
     }
-
-    // File not found
     return false;
 }
 
