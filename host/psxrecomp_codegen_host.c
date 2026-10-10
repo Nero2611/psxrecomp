@@ -1,4 +1,4 @@
-/* Portable generate → rebuild (--no-pgo from setup) → relaunch host. */
+/* Portable generate → rebuild (PGO per game.toml) → relaunch host. */
 
 #include "psxrecomp_codegen_host.h"
 
@@ -4040,8 +4040,10 @@ static void bat_write_set(FILE* f, const char* name, const char* value) {
     fprintf(f, "\"\r\n");
 }
 
-/* force_pgo: Settings Optimize FMV (instrument → train → use). Else setup
- * rebuild with --no-pgo. disc_path required when force_pgo. */
+/* force_pgo: Settings Optimize FMV (instrument → train → use). Else the setup
+ * rebuild follows the game's own [pgo] setting, so a title that ships with
+ * PGO is installed exactly as its maintainers build and test it. disc_path
+ * required when force_pgo. */
 static int write_windows_deferred_rebuild_helper(int force_pgo,
                                                  const char* disc_path,
                                                  char* err_msg,
@@ -4125,7 +4127,7 @@ static int write_windows_deferred_rebuild_helper(int force_pgo,
                 "\"%%PYTHON%%\" \"%%CLI%%\" rebuild --project-root \"%%ROOT%%\" "
                 "--config \"%%CONFIG%%\" --build-dir \"%%BUILD_DIR%%\" "
                 "--target \"%%TARGET%%\" --exe-basename \"%%EXE_BASE%%\" "
-                "--no-pgo --prune-after build-intermediates\r\n");
+                "--prune-after build-intermediates\r\n");
     }
     fprintf(f,
             "if errorlevel 1 (\r\n"
@@ -4256,7 +4258,6 @@ static int host_rebuild_game_ex(const char* disc_path, int force_pgo,
         argv[argc++] = "--force-pgo";
         argv[argc++] = "--pgo-video";
     } else {
-        argv[argc++] = "--no-pgo";
         argv[argc++] = "--prune-after";
         argv[argc++] = "build-intermediates";
     }
