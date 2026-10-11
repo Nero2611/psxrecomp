@@ -134,6 +134,22 @@ typedef struct {
 } WsUiPrepassNode;
 static WsUiPrepassNode ws_ui_prepass_nodes[WS_UI_PREPASS_NODE_MAX];
 static uint32_t ws_ui_prepass_node_count;
+/* The DMA walk validates nodes in the order the prepass recorded them, so the
+ * next expected node is checked first; a linear search covers any other
+ * order. Without the cursor every node of every list scanned the whole node
+ * table -- a third of the emulation thread's time in busy scenes. */
+static uint32_t ws_ui_prepass_node_cursor;
+
+static int ws_ui_prepass_node_find(uint32_t resolved, int advance) {
+    uint32_t i = ws_ui_prepass_node_cursor;
+    if (i >= ws_ui_prepass_node_count || ws_ui_prepass_nodes[i].addr != resolved) {
+        for (i = 0; i < ws_ui_prepass_node_count; i++)
+            if (ws_ui_prepass_nodes[i].addr == resolved) break;
+        if (i >= ws_ui_prepass_node_count) return -1;
+    }
+    ws_ui_prepass_node_cursor = advance ? i + 1u : i;
+    return (int)i;
+}
 
 /* Why a UI-looking primitive did NOT reach the squash partition.
  *
@@ -5431,6 +5447,7 @@ int gpu_ws_ot_dump(const char *path) {
 void gpu_ws_prepass_linked_list(uint32_t start_addr) {
     ws_ui_prepass_count = 0;
     ws_ui_prepass_node_count = 0;
+    ws_ui_prepass_node_cursor = 0;
     ws_ui_prepass_rank = 0xFFFFu;
     ws_auto_ui_dense = 0;
     ws_ui_reject.opcode = ws_ui_reject.not_axis = ws_ui_reject.degenerate =
@@ -5574,13 +5591,9 @@ void gpu_ws_validate_linked_list_header(uint32_t addr, uint32_t header) {
 
     uint32_t resolved =
         GPU_RAM_KEY(psx_mod_gpu_dma_resolve_address(addr));
-    for (uint32_t i = 0; i < ws_ui_prepass_node_count; i++) {
-        if (ws_ui_prepass_nodes[i].addr != resolved) continue;
-        if (ws_ui_prepass_nodes[i].header != header)
-            ws_ui_prepass_invalidate_stale();
-        return;
-    }
-    ws_ui_prepass_invalidate_stale();
+    int i = ws_ui_prepass_node_find(resolved, 0);
+    if (i < 0 || ws_ui_prepass_nodes[i].header != header)
+        ws_ui_prepass_invalidate_stale();
 }
 
 void gpu_ws_validate_linked_list_node(uint32_t addr, uint32_t num_words) {
@@ -5588,13 +5601,8 @@ void gpu_ws_validate_linked_list_node(uint32_t addr, uint32_t num_words) {
 
     uint32_t resolved =
         GPU_RAM_KEY(psx_mod_gpu_dma_resolve_address(addr));
-    const WsUiPrepassNode *node = NULL;
-    for (uint32_t i = 0; i < ws_ui_prepass_node_count; i++) {
-        if (ws_ui_prepass_nodes[i].addr == resolved) {
-            node = &ws_ui_prepass_nodes[i];
-            break;
-        }
-    }
+    int found = ws_ui_prepass_node_find(resolved, 1);
+    const WsUiPrepassNode *node = found < 0 ? NULL : &ws_ui_prepass_nodes[found];
     if (!node || node->payload_guard.word_count != num_words) {
         ws_ui_prepass_invalidate_stale();
         return;

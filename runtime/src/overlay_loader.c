@@ -597,7 +597,12 @@ static uint32_t cand_gensum(const Candidate *c) {
  * dynamic DLL loader. Generated code passes immutable {phys_lo, len} pairs and
  * the CRC of the bytes it was compiled from. A page-generation cache keeps the
  * hot path O(number of ranges), without re-hashing unchanged code each call. */
-#define STATIC_MATCH_CACHE_CAP 4096u
+/* Sized for whole-image AOT shards (Frontschweine: ~38k function identities).
+ * A full 4096-slot table made every miss scan all slots and re-hash the code,
+ * which cost a fifth of the emulation thread in busy scenes. Probing is
+ * bounded; a full neighbourhood evicts, which only costs one re-hash. */
+#define STATIC_MATCH_CACHE_CAP 65536u
+#define STATIC_MATCH_PROBE     32u
 typedef struct {
     const uint32_t *ranges;
     uint32_t count;
@@ -609,6 +614,10 @@ typedef struct {
 } StaticMatchCache;
 
 static StaticMatchCache s_static_match_cache[STATIC_MATCH_CACHE_CAP];
+/* Occupied slots in fill order, so psx_overlay_resident_crc_at() walks only
+ * entries that exist instead of the whole table. */
+static uint32_t s_static_match_used[STATIC_MATCH_CACHE_CAP];
+static uint32_t s_static_match_used_count = 0;
 
 /* Main-RAM offset of a variant code range, through the one geometry contract
  * (psx_memory.h). Retail targets fold the 2nd-4th mirrors of the 8 MiB KSEG
@@ -647,7 +656,7 @@ int psx_overlay_static_code_matches(const uint32_t *lo_len_pairs,
                                 (count * 0x9E3779B9u)) &
                                (STATIC_MATCH_CACHE_CAP - 1u));
     StaticMatchCache *entry = NULL;
-    for (uint32_t probe = 0; probe < STATIC_MATCH_CACHE_CAP; probe++) {
+    for (uint32_t probe = 0; probe < STATIC_MATCH_PROBE; probe++) {
         StaticMatchCache *candidate =
             &s_static_match_cache[(slot + probe) & (STATIC_MATCH_CACHE_CAP - 1u)];
         if (!candidate->ranges ||
@@ -658,8 +667,16 @@ int psx_overlay_static_code_matches(const uint32_t *lo_len_pairs,
             break;
         }
     }
+    if (!entry) {
+        /* Neighbourhood full of other variants: replace the home slot. The
+         * evicted variant re-validates (one CRC) the next time it runs. */
+        entry = &s_static_match_cache[slot];
+    }
+    const int identity = entry->ranges == lo_len_pairs &&
+                         entry->count == count &&
+                         entry->expected_crc == expected_crc;
 
-    if (entry && entry->ranges && entry->gen_sum == gen_sum) {
+    if (identity && entry->gen_sum == gen_sum) {
         s_static_match_gen_fastpath++;
         return entry->matches;
     }
@@ -692,6 +709,9 @@ int psx_overlay_static_code_matches(const uint32_t *lo_len_pairs,
     if (!matches) s_static_match_crc_misses++;
 
     if (entry) {
+        if (!entry->ranges && s_static_match_used_count < STATIC_MATCH_CACHE_CAP)
+            s_static_match_used[s_static_match_used_count++] =
+                (uint32_t)(entry - s_static_match_cache);
         entry->ranges = lo_len_pairs;
         entry->count = count;
         entry->expected_crc = expected_crc;
@@ -729,8 +749,8 @@ uint32_t psx_overlay_resident_crc_at(uint32_t phys, int *valid) {
         if (valid) *valid = 0;
         return s_last_crc;
     }
-    for (uint32_t i = 0; i < STATIC_MATCH_CACHE_CAP; i++) {
-        const StaticMatchCache *e = &s_static_match_cache[i];
+    for (uint32_t u = 0; u < s_static_match_used_count; u++) {
+        const StaticMatchCache *e = &s_static_match_cache[s_static_match_used[u]];
         if (!e->ranges || phys < e->lo_min || phys >= e->hi_max)
             continue;
         if (e->matches) {
@@ -3087,6 +3107,7 @@ void overlay_loader_resync_validation_after_restore(void)
         s_cand[i].val_gen ^= 0x80000000u;
 #ifdef PSX_HAS_OVERLAY_DISPATCH
     memset(s_static_match_cache, 0, sizeof(s_static_match_cache));
+    s_static_match_used_count = 0;
 #endif
 }
 

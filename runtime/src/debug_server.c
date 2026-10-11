@@ -13592,6 +13592,150 @@ static void *phase_sampler_main(void *arg)
 #endif
 }
 
+/* host_profile: host-side PC sampler for the emulation thread. phase_profile
+ * says which guest phase owns the time; this says which host code does
+ * (generated function, GTE, memory path, cycle accounting, driver). A helper
+ * thread suspends the emulation thread about once per millisecond for the
+ * requested window and records its instruction pointer; the dump reports
+ * module-relative addresses for a linker map to resolve.
+ *   {"cmd":"host_profile_start","ms":N}   (runs on the emulation thread)
+ *   {"cmd":"host_profile_dump","top":N}   -> {samples, entries:[{module,rva,count}]} */
+#ifdef _WIN32
+#define HPROF_SLOTS 65536u
+static volatile LONG s_hprof_running = 0;
+static HANDLE   s_hprof_target = NULL;
+static DWORD    s_hprof_ms = 0;
+static uint64_t s_hprof_ip[HPROF_SLOTS];
+static uint32_t s_hprof_cnt[HPROF_SLOTS];
+static uint64_t s_hprof_samples = 0, s_hprof_drops = 0;
+
+static void hprof_add(uint64_t ip)
+{
+    uint32_t h = (uint32_t)((ip >> 2) * 2654435761u);
+    for (uint32_t p = 0; p < 32; p++) {
+        uint32_t i = (h + p) & (HPROF_SLOTS - 1u);
+        if (s_hprof_ip[i] == ip) { s_hprof_cnt[i]++; return; }
+        if (s_hprof_ip[i] == 0) { s_hprof_ip[i] = ip; s_hprof_cnt[i] = 1; return; }
+    }
+    s_hprof_drops++;
+}
+
+static DWORD WINAPI hprof_main(LPVOID arg)
+{
+    (void)arg;
+    const ULONGLONG end = GetTickCount64() + s_hprof_ms;
+    while (GetTickCount64() < end) {
+        if (SuspendThread(s_hprof_target) != (DWORD)-1) {
+            CONTEXT c;
+            memset(&c, 0, sizeof c);
+            c.ContextFlags = CONTEXT_CONTROL;
+            if (GetThreadContext(s_hprof_target, &c)) {
+                hprof_add((uint64_t)c.Rip);
+                s_hprof_samples++;
+            }
+            ResumeThread(s_hprof_target);
+        }
+        Sleep(1);
+    }
+    CloseHandle(s_hprof_target);
+    s_hprof_target = NULL;
+    InterlockedExchange(&s_hprof_running, 0);
+    return 0;
+}
+#endif
+
+static void handle_host_profile_start(int id, const char *json)
+{
+#ifdef _WIN32
+    int ms = json_get_int(json, "ms", 2000);
+    if (ms < 10) ms = 10;
+    if (ms > 120000) ms = 120000;
+    if (InterlockedCompareExchange(&s_hprof_running, 1, 0) != 0) {
+        send_err(id, "host_profile already running");
+        return;
+    }
+    memset(s_hprof_ip, 0, sizeof s_hprof_ip);
+    memset(s_hprof_cnt, 0, sizeof s_hprof_cnt);
+    s_hprof_samples = s_hprof_drops = 0;
+    s_hprof_ms = (DWORD)ms;
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                         &s_hprof_target,
+                         THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                         FALSE, 0)) {
+        InterlockedExchange(&s_hprof_running, 0);
+        send_err(id, "DuplicateHandle failed");
+        return;
+    }
+    HANDLE h = CreateThread(NULL, 0, hprof_main, NULL, 0, NULL);
+    if (!h) {
+        CloseHandle(s_hprof_target);
+        s_hprof_target = NULL;
+        InterlockedExchange(&s_hprof_running, 0);
+        send_err(id, "CreateThread failed");
+        return;
+    }
+    CloseHandle(h);
+    send_fmt("{\"id\":%d,\"ok\":true,\"ms\":%d,\"thread\":%lu}", id, ms,
+             (unsigned long)GetCurrentThreadId());
+#else
+    (void)json;
+    send_err(id, "host_profile is Windows-only");
+#endif
+}
+
+static void handle_host_profile_dump(int id, const char *json)
+{
+#ifdef _WIN32
+    int top = json_get_int(json, "top", 200);
+    if (top < 1) top = 1;
+    if (top > 2000) top = 2000;
+    static uint32_t order[HPROF_SLOTS];
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < HPROF_SLOTS; i++)
+        if (s_hprof_ip[i]) order[n++] = i;
+    /* partial selection sort: top entries by count */
+    uint32_t k = (uint32_t)top < n ? (uint32_t)top : n;
+    for (uint32_t a = 0; a < k; a++) {
+        uint32_t best = a;
+        for (uint32_t b = a + 1; b < n; b++)
+            if (s_hprof_cnt[order[b]] > s_hprof_cnt[order[best]]) best = b;
+        uint32_t t = order[a]; order[a] = order[best]; order[best] = t;
+    }
+    size_t cap = 256u + (size_t)k * 128u;
+    char *buf = (char *)malloc(cap);
+    if (!buf) { send_err(id, "alloc failed"); return; }
+    size_t pos = (size_t)snprintf(buf, cap,
+        "{\"id\":%d,\"ok\":true,\"running\":%ld,\"samples\":%llu,\"drops\":%llu,\"entries\":[",
+        id, (long)s_hprof_running, (unsigned long long)s_hprof_samples,
+        (unsigned long long)s_hprof_drops);
+    for (uint32_t a = 0; a < k && pos < cap - 160; a++) {
+        uint64_t ip = s_hprof_ip[order[a]];
+        HMODULE mod = NULL;
+        char name[MAX_PATH] = "?";
+        uint64_t base = 0;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)(uintptr_t)ip, &mod) && mod) {
+            base = (uint64_t)(uintptr_t)mod;
+            char full[MAX_PATH];
+            if (GetModuleFileNameA(mod, full, sizeof full)) {
+                const char *slash = strrchr(full, '\\');
+                snprintf(name, sizeof name, "%s", slash ? slash + 1 : full);
+            }
+        }
+        pos += (size_t)snprintf(buf + pos, cap - pos,
+            "%s{\"module\":\"%s\",\"rva\":\"0x%llX\",\"count\":%u}",
+            a ? "," : "", name, (unsigned long long)(ip - base), s_hprof_cnt[order[a]]);
+    }
+    snprintf(buf + pos, cap - pos, "]}");
+    debug_server_send_line(buf);
+    free(buf);
+#else
+    (void)json;
+    send_err(id, "host_profile is Windows-only");
+#endif
+}
+
 static void phase_sampler_start(void)
 {
 #ifdef _WIN32
@@ -13812,6 +13956,8 @@ static void handle_warm_cd_route(int id, const char *json)
 
 static const CmdEntry s_commands[] = {
     { "phase_profile",     handle_phase_profile },
+    { "host_profile_start", handle_host_profile_start },
+    { "host_profile_dump", handle_host_profile_dump },
     { "starv_ring",        handle_starv_ring },
     { "data_shards",       handle_data_shards },
     { "vsync_query_hle",   handle_vsync_query_hle },

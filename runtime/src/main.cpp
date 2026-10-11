@@ -13684,6 +13684,11 @@ int main(int argc, char** argv) {
                 " --project-root " + cmd_quote(tk_dir.string()) +
                 " --out-dir " + cmd_quote((tk_xd / "cache").string()) +
                 (g_psx_cps_mode ? " --cps" : "") +
+                /* One worker: the live compile runs while the game plays.
+                 * compile_overlays.py defaults to cores-2 parallel compilers,
+                 * which loads nearly the whole machine during a fresh
+                 * install's first sessions despite below-normal priority. */
+                " --jobs 1" +
                 " --compiler " + compiler;
             if (std::string(compiler) == "gcc" && !tk_compiler.empty())
                 c += " --gcc " + cmd_quote(tk_compiler);
