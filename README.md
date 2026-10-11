@@ -47,7 +47,10 @@ Trusted game plugins (`runtime/include/mod_plugins.h`) get:
   `$ra` and skips the generated body, or replace a guest poll loop with
   `psx_mod_function_wait()`: device time advances to the next event the
   guest could observe, its interrupts are delivered, and the function is
-  entered again to re-check. Interpreted entries still only observe.
+  entered again to re-check. This works in the main executable and in
+  overlay code, compiled ahead of time or at runtime (overlay ABI 24
+  forwards the takeover to overlay DLLs). Interpreted entries still only
+  observe.
 - **Disc and memory.** `psx_mod_find_disc_file()` locates a file on the
   mounted disc, `psx_mod_write_guest_bytes()` stores a block with the
   RAM-side effects of a to-RAM CD DMA (written code is invalidated),
@@ -69,6 +72,21 @@ as `BRIEF\GERMAN\LEVEL1.BIN` resolve.
   match the profile's SHA-256, and fails extraction instead of guessing.
 - Setup packages may omit the profile's static overlay shard: it is
   generated from the player's own disc and must never ship.
+- The static-code match cache holds 65536 entries with bounded probing and
+  an exact identity check. With many resident overlay functions the old
+  4096-entry table thrashed and re-hashed code on every dispatch.
+
+### Setup wizard
+
+The setup wizard's rebuild follows the game's `[pgo]` setting instead of
+always passing `--no-pgo`, so an installed setup package builds exactly like
+`rebuild` from a clone.
+
+### Background compiler
+
+The live autocompile runs with one compiler job. The default of all cores but
+two loaded nearly the whole machine during a fresh install's first sessions,
+despite its below-normal priority.
 
 ### Toolchain download
 
@@ -106,6 +124,16 @@ hud43_keep = [                  # world-anchored overlays in those ranks
 
 Polygons whose corners all come straight from the GTE already carry the
 projection squash and are not squashed twice.
+
+Validating the ordering-table walk against the widescreen prepass now
+continues from the last matched node instead of searching from the start for
+every node, which was quadratic in scenes with many primitives.
+
+### Debug server
+
+With `PSX_DEBUG_TOOLS`, `host_profile_start` / `host_profile_dump` sample the
+emulation thread's host instruction pointer (Windows) and report module and
+RVA counts, for finding host-side hot spots with a linker map.
 
 ## License
 
