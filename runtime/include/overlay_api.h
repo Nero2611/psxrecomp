@@ -106,7 +106,9 @@
  *      the version stays. The emit-content change (PGXP_*() macros in all
  *      generated C) is covered by the codegen hash + CODEGEN_VER below. */
 /* v23: native overlay forwarding for signed screen bounds and mod entry hooks. */
-#define PSX_OVERLAY_ABI_VERSION 23
+/* v24: mod_function_entry_replace forwarder, so a mod hook can take over a
+ *      call into overlay-resident code. */
+#define PSX_OVERLAY_ABI_VERSION 24
 
 /* Process-lifetime overlay candidate capacity.  Every accepted manifest F
  * record consumes one slot, even when another DLL carries an identical
@@ -342,6 +344,9 @@ typedef struct {
     const PGXPHooks *pgxp;
     int32_t (*ws_screen_x_bound)(int32_t vanilla);
     void (*mod_function_entry)(CPUState *cpu, uint32_t address);
+    /* ABI v24: generated hook sites call psx_mod_function_entry_replace so a
+     * hook can take over the call; overlay-resident code forwards it here. */
+    int (*mod_function_entry_replace)(CPUState *cpu, uint32_t address);
 } OverlayCallbacks;
 
 #ifdef __cplusplus
