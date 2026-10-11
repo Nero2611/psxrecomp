@@ -43,6 +43,16 @@ typedef struct {
 void dma_gpu_ll_start(DMAGPULinkedList *state, uint32_t start_addr,
                       uint32_t max_nodes);
 void dma_gpu_ll_cancel(DMAGPULinkedList *state);
+/* Stop the walk the way the CPU stops it on hardware, by clearing CHCR's
+ * start bit: a node's packet goes to the GPU as one block (DuckStation
+ * transfers each node's payload in one call and halts only between nodes),
+ * so the node in flight is delivered to the end first. Returns the address
+ * of the next node header for MADR, or 0x00FFFFFF after the last node, and
+ * leaves the walk inactive. Without this a stop mid-packet left the GPU
+ * waiting for the rest of a command, and it swallowed the CPU's next GP0
+ * words (libgpu BreakDraw followed by StoreImage hung until its timeout). */
+uint32_t dma_gpu_ll_stop(DMAGPULinkedList *state,
+                         const DMAGPULinkedListOps *ops, void *opaque);
 uint32_t dma_gpu_ll_cycles_to_event(const DMAGPULinkedList *state);
 void dma_gpu_ll_advance(DMAGPULinkedList *state, uint32_t cycles,
                         const DMAGPULinkedListOps *ops, void *opaque);

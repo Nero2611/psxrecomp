@@ -39,6 +39,39 @@ void dma_gpu_ll_cancel(DMAGPULinkedList *state) {
     memset(state, 0, sizeof(*state));
 }
 
+uint32_t dma_gpu_ll_stop(DMAGPULinkedList *state,
+                         const DMAGPULinkedListOps *ops, void *opaque) {
+    uint32_t next = 0x00FFFFFFu;
+    if (state->active && ops && ops->read_word) {
+        if (state->phase == DMA_GPU_LL_PHASE_HEADER) {
+            next = state->current_addr;
+        } else {
+            if (state->phase == DMA_GPU_LL_PHASE_SETUP) {
+                state->emit_node = ops->begin_node
+                    ? (uint8_t)(ops->begin_node(
+                          opaque, state->current_addr, state->word_count) != 0)
+                    : 1u;
+                state->phase = DMA_GPU_LL_PHASE_PAYLOAD;
+            }
+            while (state->payload_index < state->word_count) {
+                uint32_t word_addr = resolve_address(
+                    ops, opaque, state->current_addr + 4u +
+                                 state->payload_index * 4u);
+                if (state->emit_node) {
+                    uint32_t word = ops->read_word(opaque, word_addr);
+                    if (ops->emit_word)
+                        ops->emit_word(opaque, word_addr, word);
+                }
+                state->payload_index++;
+                state->total_words++;
+            }
+            next = state->next_addr;
+        }
+    }
+    memset(state, 0, sizeof(*state));
+    return next & 0x00FFFFFFu;
+}
+
 uint32_t dma_gpu_ll_cycles_to_event(const DMAGPULinkedList *state) {
     if (!state->active) return UINT32_MAX;
     return state->cycles_remaining ? state->cycles_remaining : 1u;

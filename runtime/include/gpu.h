@@ -85,6 +85,18 @@ void gpu_get_crtc_debug(uint32_t *x1, uint32_t *x2, uint32_t *y1, uint32_t *y2,
 uint64_t gpu_get_gp0_count(void);  /* Total GP0 writes since init */
 void gpu_get_gp0_stats(uint64_t* nop, uint64_t* fill, uint64_t* draw, uint64_t* env, uint64_t* copy);
 
+/* GP0 command parser state, for debugging a command stream out of step. */
+typedef struct {
+    int state;               /* Gp0State: 0 idle, 1 collecting, 2 VRAM write,
+                                3 mono polyline, 4 shaded polyline */
+    int words_collected, words_needed;
+    uint32_t cmd_buf[16];
+    int polyline_has_prev;
+    uint32_t vram_write_remaining;
+    int vram_read_active;
+} GpuGp0Parser;
+void gpu_get_gp0_parser(GpuGp0Parser* out);
+
 typedef struct {
     uint32_t left, top, right, bottom;
     int32_t offset_x, offset_y;

@@ -82,6 +82,17 @@ The setup wizard's rebuild follows the game's `[pgo]` setting instead of
 always passing `--no-pgo`, so an installed setup package builds exactly like
 `rebuild` from a clone.
 
+### GPU linked-list DMA stop
+
+When the CPU clears DMA2's start bit during an ordering-table walk, the node
+in flight is still delivered whole and MADR is left at the next node, as on
+hardware (DuckStation transfers each node in one block and halts only between
+nodes). The walk used to stop mid-packet, so the GPU kept waiting for the rest
+of a command and swallowed the CPU's next GP0 words: libgpu's `BreakDraw()`
+followed by `StoreImage()` hung until libgpu's timeout reset the GPU, which
+froze the picture for several seconds. The debug server's `gp0_parser_state`
+shows where the GP0 command parser stands.
+
 ### Background compiler
 
 The live autocompile runs with one compiler job. The default of all cores but

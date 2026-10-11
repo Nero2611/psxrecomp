@@ -396,6 +396,8 @@ static void complete_transfer(int ch) {
 
 /* ---- Transfer execution ---- */
 
+static const DMAGPULinkedListOps gpu_ll_ops;
+
 static void cancel_async_transfer(int ch) {
     if (ch >= 0 && ch < 2) {
         mdec_async[ch].active = 0;
@@ -425,8 +427,10 @@ static void cancel_async_transfer(int ch) {
         c->polls  = gpu_ot_polls_this_walk;
         gpu_ot_stats.cancel_ring_count++;
         gpu_ot_stats.cancels++;
+        /* The node in flight still reaches the GPU whole; MADR is left at the
+         * next node, where libgpu's BreakDraw/DrawOTag resume. */
+        channels[2].madr = dma_gpu_ll_stop(&gpu_linked_list, &gpu_ll_ops, NULL);
         gpu_ws_end_linked_list();
-        dma_gpu_ll_cancel(&gpu_linked_list);
     }
     if (ch >= 0 && ch < 7) {
         delayed_complete[ch].active = 0;

@@ -6103,6 +6103,16 @@ void gpu_get_gp0_stats(uint64_t* nop, uint64_t* fill, uint64_t* draw, uint64_t* 
     *draw = gp0_draw_count; *env = gp0_env_count; *copy = gp0_copy_count;
 }
 
+void gpu_get_gp0_parser(GpuGp0Parser* out) {
+    out->state = (int)gp0_state;
+    out->words_collected = gp0_words_collected;
+    out->words_needed = gp0_words_needed;
+    for (int i = 0; i < 16; i++) out->cmd_buf[i] = gp0_cmd_buf[i];
+    out->polyline_has_prev = polyline_has_prev;
+    out->vram_write_remaining = vram_write_remaining;
+    out->vram_read_active = vram_read_active;
+}
+
 void gpu_get_draw_area(GpuDrawArea* out) {
     out->left = draw_area_left;
     out->top = draw_area_top;

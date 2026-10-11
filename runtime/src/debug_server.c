@@ -5950,6 +5950,27 @@ static const char *dma_trace_kind_name(uint32_t kind)
     }
 }
 
+/* gp0_parser_state: where the GP0 command parser stands (idle, collecting a
+ * command's words, inside a CPU-to-VRAM transfer or a polyline). */
+static void handle_gp0_parser_state(int id, const char *json)
+{
+    (void)json;
+    GpuGp0Parser g;
+    gpu_get_gp0_parser(&g);
+    char buf[1024];
+    size_t pos = (size_t)snprintf(buf, sizeof(buf),
+        "{\"id\":%d,\"ok\":true,\"state\":%d,\"words_collected\":%d,"
+        "\"words_needed\":%d,\"polyline_has_prev\":%d,"
+        "\"vram_write_remaining\":%u,\"vram_read_active\":%d,\"cmd_buf\":[",
+        id, g.state, g.words_collected, g.words_needed, g.polyline_has_prev,
+        g.vram_write_remaining, g.vram_read_active);
+    for (int i = 0; i < 16; i++)
+        pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "%s\"0x%08X\"",
+                                i ? "," : "", g.cmd_buf[i]);
+    snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    debug_server_send_line(buf);
+}
+
 static void handle_dma_state(int id, const char *json)
 {
     (void)json;
@@ -14203,6 +14224,7 @@ static const CmdEntry s_commands[] = {
     { "wide_full",         handle_wide_full },
     { "wide_shot",         handle_wide_shot },
     { "gpu_opcodes",       handle_gpu_opcodes },
+    { "gp0_parser_state",  handle_gp0_parser_state },
     { "gpu_ring_stats",    handle_gpu_ring_stats },
     { "gpu_frame_dump",    handle_gpu_frame_dump },
     { "a0_history",        handle_a0_history },

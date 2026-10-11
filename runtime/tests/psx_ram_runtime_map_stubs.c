@@ -91,6 +91,9 @@ void cdrom_debug_snapshot(void *out) { (void)out; }
 uint32_t cdrom_dma_sector_word_count(void) { return 0; }
 void dma_gpu_ll_start(void *s, uint32_t a, uint32_t m) { (void)s; (void)a; (void)m; }
 void dma_gpu_ll_cancel(void *s) { (void)s; }
+uint32_t dma_gpu_ll_stop(void *s, const void *o, void *q) {
+    (void)s; (void)o; (void)q; return 0x00FFFFFFu;
+}
 void gpu_ws_begin_linked_list(void) {}
 void gpu_ws_end_linked_list(void) {}
 void gpu_ws_prepass_linked_list(uint32_t a) { (void)a; }

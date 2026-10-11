@@ -139,6 +139,41 @@ int main(void) {
         CHECK(spent == NODES);                     /* nodes + 0 payload words */
     }
 
+    /* A CPU stop (CHCR start bit cleared) lands between nodes: the packet in
+     * flight still reaches the GPU whole, and the stop reports the next node
+     * for MADR. libgpu's BreakDraw resumes there; a half-sent packet made the
+     * GPU swallow the CPU's next commands. */
+    memset(ram, 0, sizeof(ram));
+    memset(emitted, 0, sizeof(emitted));
+    emitted_count = completed = hit_limit = 0u;
+    ram[0x00 / 4] = 0x03000020u;                /* 3 words -> node at 0x20 */
+    ram[0x04 / 4] = 0x11111111u;
+    ram[0x08 / 4] = 0x22222222u;
+    ram[0x0C / 4] = 0x33333333u;
+    ram[0x20 / 4] = 0x01FFFFFFu;
+    ram[0x24 / 4] = 0x44444444u;
+    dma_gpu_ll_start(&state, 0x00u, 8u);
+    dma_gpu_ll_advance(&state, 2u, &ops, NULL);  /* header + first word */
+    CHECK(emitted_count == 1u);
+    CHECK(dma_gpu_ll_stop(&state, &ops, NULL) == 0x20u);
+    CHECK(emitted_count == 3u && emitted[2] == 0x33333333u);
+    CHECK(!state.active && completed == 0u);
+
+    /* Stopped between nodes: nothing more is sent, MADR is that node. */
+    emitted_count = 0u;
+    dma_gpu_ll_start(&state, 0x00u, 8u);
+    dma_gpu_ll_advance(&state, 4u, &ops, NULL);  /* whole first node */
+    CHECK(emitted_count == 3u);
+    CHECK(dma_gpu_ll_stop(&state, &ops, NULL) == 0x20u);
+    CHECK(emitted_count == 3u && !state.active);
+
+    /* Stopped inside the last node: the list is done, MADR the terminator. */
+    emitted_count = 0u;
+    dma_gpu_ll_start(&state, 0x20u, 8u);
+    dma_gpu_ll_advance(&state, 1u, &ops, NULL);  /* header only */
+    CHECK(dma_gpu_ll_stop(&state, &ops, NULL) == 0x00FFFFFFu);
+    CHECK(emitted_count == 1u && emitted[0] == 0x44444444u);
+
     /* A malformed cycle is bounded and reports the safety stop. */
     memset(ram, 0, sizeof(ram));
     completed = hit_limit = 0u;
